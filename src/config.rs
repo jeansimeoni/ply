@@ -115,6 +115,18 @@ impl Default for InstallConfig {
     }
 }
 
+pub fn ensure_initialized(project_root: &Path) -> Result<()> {
+    let path = project_root.join("ply.toml");
+    if path.exists() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "ply is not initialized in {}; run `ply init` to scaffold ply.toml and local state files",
+        project_root.display()
+    ))
+}
+
 pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
     let path = project_root.join("ply.toml");
     let content =
