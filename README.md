@@ -2,6 +2,21 @@
 
 Composable package manager for coding-agent assets across Claude Code, Codex, and other AI developer tools.
 
+## Development
+
+This repository uses [`mise`](https://mise.jdx.dev/) to pin the Rust toolchain.
+
+```bash
+mise install
+cargo test
+```
+
+If you prefer not to activate `mise` in your shell, run commands through it directly:
+
+```bash
+mise exec -- cargo test
+```
+
 ## MVP status
 
 The current MVP supports:
