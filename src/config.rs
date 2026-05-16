@@ -74,7 +74,15 @@ pub struct State {
     #[serde(default)]
     pub install_mode: String,
     #[serde(default)]
+    pub ignore_config: bool,
+    #[serde(default)]
     pub owned_paths: Vec<OwnedPath>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct InitOptions {
+    pub scaffold_local_packages: bool,
+    pub ignore_config: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +163,7 @@ pub fn load_state(project_root: &Path) -> Result<State> {
         return Ok(State {
             schema_version: 1,
             install_mode: default_install_mode(),
+            ignore_config: false,
             owned_paths: Vec::new(),
         });
     }
@@ -179,12 +188,13 @@ pub fn write_state(project_root: &Path, state: &State) -> Result<()> {
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
-pub fn write_default_manifest(project_root: &Path) -> Result<()> {
+pub fn write_default_manifest(project_root: &Path, options: InitOptions) -> Result<()> {
     let path = project_root.join("ply.toml");
     if path.exists() {
         return Ok(());
     }
-    let template = r#"schema_version = 1
+    let template = if options.scaffold_local_packages {
+        r#"schema_version = 1
 adapters = ["codex", "claude"]
 
 [install]
@@ -198,7 +208,15 @@ path = "./ply-packages"
 [[packages]]
 source = "local"
 path = "example-review"
-"#;
+"#
+    } else {
+        r#"schema_version = 1
+adapters = ["codex", "claude"]
+
+[install]
+mode = "copy"
+"#
+    };
     fs::write(&path, template).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -278,13 +296,6 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
             manifest.install.mode
         ));
     }
-    if manifest.sources.is_empty() {
-        return Err(anyhow!("manifest must define at least one source"));
-    }
-    if manifest.packages.is_empty() {
-        return Err(anyhow!("manifest must define at least one package"));
-    }
-
     let mut source_ids = BTreeSet::new();
     for source in &manifest.sources {
         if !source_ids.insert(source.id.clone()) {

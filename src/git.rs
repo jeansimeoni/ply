@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::SourceConfig;
+use crate::config::{InitOptions, SourceConfig};
 
 const PLY_EXCLUDE_START: &str = "# ply:start";
 const PLY_EXCLUDE_END: &str = "# ply:end";
@@ -14,9 +14,10 @@ pub fn ensure_git_repo(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_local_excludes(project_root: &Path) -> Result<()> {
+pub fn ensure_local_excludes(project_root: &Path, options: InitOptions) -> Result<()> {
     let exclude_path = project_root.join(".git").join("info").join("exclude");
-    let block = r#"# ply:start
+    let mut block = String::from(
+        r#"# ply:start
 .ply/generated/
 .ply/cache/
 .ply/state.json
@@ -26,8 +27,15 @@ imp-plan/
 .claude/skills/ply-*/
 .agents/commands/ply-*.md
 .agents/skills/ply-*/
-# ply:end
-"#;
+"#,
+    );
+    if options.ignore_config {
+        block.push_str(".ply/\n");
+        block.push_str("ply.toml\n");
+        block.push_str("ply.lock\n");
+        block.push_str("ply-packages/\n");
+    }
+    block.push_str("# ply:end\n");
     let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
     if existing.contains(PLY_EXCLUDE_START) {
         return Ok(());
@@ -36,7 +44,7 @@ imp-plan/
     if !content.ends_with('\n') && !content.is_empty() {
         content.push('\n');
     }
-    content.push_str(block);
+    content.push_str(&block);
     fs::write(&exclude_path, content)
         .with_context(|| format!("failed to update {}", exclude_path.display()))
 }

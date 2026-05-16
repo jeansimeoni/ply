@@ -41,6 +41,28 @@ pub fn prompt_confirmation(title: &str, body: &str) -> Result<bool, io::Error> {
     Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
+pub fn prompt_yes_no(title: &str, body: &str, default_yes: bool) -> Result<bool, io::Error> {
+    let unicode = stdout_supports_unicode();
+    let mut stdout = io::stdout();
+    write_panel(&mut stdout, unicode, Tone::Info, title, body)?;
+    let prompt = if default_yes {
+        "  Continue? [Y/n]: "
+    } else {
+        "  Continue? [y/N]: "
+    };
+    write!(stdout, "{prompt}")?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    writeln!(stdout)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(default_yes);
+    }
+    Ok(matches!(answer.as_str(), "y" | "yes"))
+}
+
 pub fn error_body(error: &Error) -> String {
     let mut body = String::new();
     body.push_str(&error.to_string());

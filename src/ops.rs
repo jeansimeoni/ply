@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::adapters::{AdapterKind, AssetKind};
 use crate::config::{
-    self, LocalOverlayConfig, LockedSource, Lockfile, OwnedPath, PackageManifest, State,
-    load_local_overlays, load_manifest, load_package_manifest, load_state,
+    self, InitOptions, LocalOverlayConfig, LockedSource, Lockfile, OwnedPath, PackageManifest,
+    State, load_local_overlays, load_manifest, load_package_manifest, load_state,
 };
 use crate::git;
 use crate::ui::{self, Tone};
@@ -48,9 +48,16 @@ pub struct CleanupReport {
     pub updated_git_excludes: bool,
 }
 
-pub fn init_project(project_root: &Path) -> Result<()> {
+#[derive(Debug, Clone)]
+pub struct InitReport {
+    pub created_manifest: bool,
+    pub created_local_fixture: bool,
+    pub ignore_config: bool,
+}
+
+pub fn init_project(project_root: &Path, options: InitOptions) -> Result<InitReport> {
     git::ensure_git_repo(project_root)?;
-    git::ensure_local_excludes(project_root)?;
+    git::ensure_local_excludes(project_root, options)?;
     fs::create_dir_all(project_root.join(".ply").join("generated"))?;
     fs::create_dir_all(
         project_root
@@ -66,18 +73,31 @@ pub fn init_project(project_root: &Path) -> Result<()> {
             .join("claude")
             .join("skills"),
     )?;
-    config::write_default_manifest(project_root)?;
+    let created_manifest = !project_root.join("ply.toml").exists();
+    config::write_default_manifest(project_root, options)?;
     config::write_default_local_overlay(project_root)?;
     config::write_state(
         project_root,
         &State {
             schema_version: 1,
             install_mode: "copy".to_string(),
+            ignore_config: options.ignore_config,
             owned_paths: Vec::new(),
         },
     )?;
-    config::write_default_package_fixture(project_root)?;
-    Ok(())
+    let mut created_local_fixture = false;
+    if options.scaffold_local_packages {
+        created_local_fixture = !project_root
+            .join("ply-packages")
+            .join("example-review")
+            .exists();
+        config::write_default_package_fixture(project_root)?;
+    }
+    Ok(InitReport {
+        created_manifest,
+        created_local_fixture,
+        ignore_config: options.ignore_config,
+    })
 }
 
 pub fn preview_cleanup(project_root: &Path) -> Result<CleanupPreview> {
@@ -130,10 +150,16 @@ pub fn clean_project(project_root: &Path) -> Result<CleanupReport> {
 
 pub fn apply(project_root: &Path) -> Result<String> {
     git::ensure_git_repo(project_root)?;
-    git::ensure_local_excludes(project_root)?;
+    let previous_state = load_state(project_root)?;
+    git::ensure_local_excludes(
+        project_root,
+        InitOptions {
+            scaffold_local_packages: false,
+            ignore_config: previous_state.ignore_config,
+        },
+    )?;
     let manifest = load_manifest(project_root)?;
     let overlays = load_local_overlays(project_root)?;
-    let previous_state = load_state(project_root)?;
     let (sources, packages) = resolve(project_root, &manifest)?;
     let planned_files = build_plan(project_root, &manifest.adapters, &packages, &overlays)?;
     verify_exposed_targets(project_root, &planned_files, &previous_state)?;
@@ -155,6 +181,7 @@ pub fn apply(project_root: &Path) -> Result<String> {
     let state = State {
         schema_version: 1,
         install_mode: manifest.install.mode.clone(),
+        ignore_config: previous_state.ignore_config,
         owned_paths: planned_files
             .iter()
             .map(|file| OwnedPath {
@@ -298,6 +325,9 @@ pub fn list_packages(project_root: &Path) -> Result<String> {
             package.source_id
         )));
     }
+    if lines.is_empty() {
+        lines.push(ui::list_item("No packages configured."));
+    }
     Ok(lines.join("\n"))
 }
 
@@ -310,6 +340,9 @@ pub fn list_sources(project_root: &Path) -> Result<String> {
             "{} [{}] {}",
             source.id, source.kind, source.resolved
         )));
+    }
+    if lines.is_empty() {
+        lines.push(ui::list_item("No sources configured."));
     }
     Ok(lines.join("\n"))
 }
@@ -710,7 +743,13 @@ mod tests {
     #[test]
     fn init_scaffolds_project_files() -> Result<()> {
         let temp = make_project()?;
-        init_project(temp.path())?;
+        init_project(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: true,
+                ignore_config: false,
+            },
+        )?;
         assert!(temp.path().join("ply.toml").exists());
         assert!(temp.path().join(".ply").join("local.yml").exists());
         assert!(temp.path().join(".ply").join("state.json").exists());
@@ -720,7 +759,13 @@ mod tests {
     #[test]
     fn apply_copies_assets_from_path_source() -> Result<()> {
         let temp = make_project()?;
-        init_project(temp.path())?;
+        init_project(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: true,
+                ignore_config: false,
+            },
+        )?;
         apply(temp.path())?;
         let skill = temp
             .path()
@@ -735,7 +780,13 @@ mod tests {
     #[test]
     fn apply_refuses_tracked_conflict() -> Result<()> {
         let temp = make_project()?;
-        init_project(temp.path())?;
+        init_project(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: true,
+                ignore_config: false,
+            },
+        )?;
         let tracked = temp
             .path()
             .join(".agents")
@@ -809,7 +860,13 @@ mod tests {
     #[test]
     fn clean_removes_ply_managed_files_and_preserves_neighbors() -> Result<()> {
         let temp = make_project()?;
-        init_project(temp.path())?;
+        init_project(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: true,
+                ignore_config: false,
+            },
+        )?;
         apply(temp.path())?;
         write(
             &temp
@@ -851,6 +908,28 @@ mod tests {
             !git::has_ply_excludes(temp.path()),
             "ply ignore block should be removed"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn init_can_skip_local_package_fixture() -> Result<()> {
+        let temp = make_project()?;
+        let report = init_project(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: false,
+                ignore_config: true,
+            },
+        )?;
+        assert!(report.created_manifest);
+        assert!(!report.created_local_fixture);
+        assert!(report.ignore_config);
+        assert!(!temp.path().join("ply-packages").exists());
+        let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert!(!manifest.contains("[[sources]]"));
+        assert!(!manifest.contains("[[packages]]"));
+        let state = load_state(temp.path())?;
+        assert!(state.ignore_config);
         Ok(())
     }
 }
