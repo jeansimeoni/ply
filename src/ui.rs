@@ -46,9 +46,9 @@ pub fn prompt_yes_no(title: &str, body: &str, default_yes: bool) -> Result<bool,
     let mut stdout = io::stdout();
     write_panel(&mut stdout, unicode, Tone::Info, title, body)?;
     let prompt = if default_yes {
-        "  Continue? [Y/n]: "
+        "  Enable this option? [Y/n]: "
     } else {
-        "  Continue? [y/N]: "
+        "  Enable this option? [y/N]: "
     };
     write!(stdout, "{prompt}")?;
     stdout.flush()?;
