@@ -9,6 +9,7 @@ use crate::config::{
     load_local_overlays, load_manifest, load_package_manifest, load_state,
 };
 use crate::git;
+use crate::ui::{self, Tone};
 
 #[derive(Debug, Clone)]
 struct ResolvedSource {
@@ -33,6 +34,18 @@ struct PlannedFile {
     generated_relative_path: PathBuf,
     exposed_relative_path: PathBuf,
     contents: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanupPreview {
+    pub items: Vec<String>,
+    pub updates_git_excludes: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanupReport {
+    pub removed_items: Vec<String>,
+    pub updated_git_excludes: bool,
 }
 
 pub fn init_project(project_root: &Path) -> Result<()> {
@@ -65,6 +78,54 @@ pub fn init_project(project_root: &Path) -> Result<()> {
     )?;
     config::write_default_package_fixture(project_root)?;
     Ok(())
+}
+
+pub fn preview_cleanup(project_root: &Path) -> Result<CleanupPreview> {
+    git::ensure_git_repo(project_root)?;
+
+    let mut items = Vec::new();
+    for path in managed_cleanup_paths(project_root)? {
+        items.push(path.strip_prefix(project_root)?.display().to_string());
+    }
+    let updates_git_excludes = git::has_ply_excludes(project_root);
+
+    if items.is_empty() && !updates_git_excludes {
+        return Err(anyhow!(
+            "ply is not initialized in {}; run `ply init` to scaffold ply.toml and local state files",
+            project_root.display()
+        ));
+    }
+
+    Ok(CleanupPreview {
+        items,
+        updates_git_excludes,
+    })
+}
+
+pub fn clean_project(project_root: &Path) -> Result<CleanupReport> {
+    let preview = preview_cleanup(project_root)?;
+    let mut removed_items = Vec::new();
+
+    for path in managed_cleanup_paths(project_root)? {
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        removed_items.push(path.strip_prefix(project_root)?.display().to_string());
+        prune_empty_parents(project_root, &path)?;
+    }
+
+    let updated_git_excludes = if preview.updates_git_excludes {
+        git::remove_local_excludes(project_root)?
+    } else {
+        false
+    };
+
+    Ok(CleanupReport {
+        removed_items,
+        updated_git_excludes,
+    })
 }
 
 pub fn apply(project_root: &Path) -> Result<String> {
@@ -139,31 +200,43 @@ pub fn diff(project_root: &Path) -> Result<String> {
         let generated = generated_abs_path(project_root, file);
         let exposed = exposed_abs_path(project_root, file);
         if !generated.exists() {
-            lines.push(format!(
-                "generate {}",
-                file.generated_relative_path.display()
+            lines.push(ui::status_line(
+                Tone::Info,
+                &format!("generate {}", file.generated_relative_path.display()),
             ));
         } else if fs::read(&generated)? != file.contents {
-            lines.push(format!("update {}", file.generated_relative_path.display()));
+            lines.push(ui::status_line(
+                Tone::Warning,
+                &format!("update {}", file.generated_relative_path.display()),
+            ));
         }
         if !exposed.exists() {
-            lines.push(format!("expose {}", file.exposed_relative_path.display()));
+            lines.push(ui::status_line(
+                Tone::Info,
+                &format!("expose {}", file.exposed_relative_path.display()),
+            ));
         } else if fs::read(&exposed)? != file.contents {
-            lines.push(format!("refresh {}", file.exposed_relative_path.display()));
+            lines.push(ui::status_line(
+                Tone::Warning,
+                &format!("refresh {}", file.exposed_relative_path.display()),
+            ));
         }
     }
 
     for stale in owned_previous.difference(&desired_exposed) {
-        lines.push(format!(
-            "remove {}",
-            stale.strip_prefix(project_root)?.display()
+        lines.push(ui::status_line(
+            Tone::Warning,
+            &format!("remove {}", stale.strip_prefix(project_root)?.display()),
         ));
     }
     for generated_path in collect_file_paths(&project_root.join(".ply").join("generated"))? {
         if !desired_generated.contains(&generated_path) {
-            lines.push(format!(
-                "remove {}",
-                generated_path.strip_prefix(project_root)?.display()
+            lines.push(ui::status_line(
+                Tone::Warning,
+                &format!(
+                    "remove {}",
+                    generated_path.strip_prefix(project_root)?.display()
+                ),
             ));
         }
     }
@@ -179,25 +252,31 @@ pub fn doctor(project_root: &Path) -> Result<String> {
     let overlays = load_local_overlays(project_root)?;
     let (sources, packages) = resolve(project_root, &manifest)?;
     let planned_files = build_plan(project_root, &manifest.adapters, &packages, &overlays)?;
-    let mut lines = vec!["[OK] manifest parsed".to_string()];
-    lines.push(format!("[OK] {} source(s) resolved", sources.len()));
-    lines.push(format!("[OK] {} package(s) resolved", packages.len()));
-    lines.push(format!(
-        "[OK] {} managed file(s) planned",
-        planned_files.len()
+    let mut lines = vec![ui::status_line(Tone::Success, "manifest parsed")];
+    lines.push(ui::status_line(
+        Tone::Success,
+        &format!("{} source(s) resolved", sources.len()),
+    ));
+    lines.push(ui::status_line(
+        Tone::Success,
+        &format!("{} package(s) resolved", packages.len()),
+    ));
+    lines.push(ui::status_line(
+        Tone::Success,
+        &format!("{} managed file(s) planned", planned_files.len()),
     ));
     for file in &planned_files {
         let exposed = exposed_abs_path(project_root, file);
         if git::is_tracked(project_root, &exposed)? {
-            lines.push(format!(
-                "[WARN] tracked target {}",
-                file.exposed_relative_path.display()
+            lines.push(ui::status_line(
+                Tone::Warning,
+                &format!("tracked target {}", file.exposed_relative_path.display()),
             ));
         }
         if !git::is_ignored(project_root, &exposed)? {
-            lines.push(format!(
-                "[WARN] unignored target {}",
-                file.exposed_relative_path.display()
+            lines.push(ui::status_line(
+                Tone::Warning,
+                &format!("unignored target {}", file.exposed_relative_path.display()),
             ));
         }
     }
@@ -209,7 +288,7 @@ pub fn list_packages(project_root: &Path) -> Result<String> {
     let (_, packages) = resolve(project_root, &manifest)?;
     let mut lines = Vec::new();
     for package in packages {
-        lines.push(format!(
+        lines.push(ui::list_item(&format!(
             "{} ({}) from {}",
             package.manifest.name,
             package
@@ -217,7 +296,7 @@ pub fn list_packages(project_root: &Path) -> Result<String> {
                 .version
                 .unwrap_or_else(|| "unversioned".to_string()),
             package.source_id
-        ));
+        )));
     }
     Ok(lines.join("\n"))
 }
@@ -227,10 +306,10 @@ pub fn list_sources(project_root: &Path) -> Result<String> {
     let (sources, _) = resolve(project_root, &manifest)?;
     let mut lines = Vec::new();
     for source in sources {
-        lines.push(format!(
+        lines.push(ui::list_item(&format!(
             "{} [{}] {}",
             source.id, source.kind, source.resolved
-        ));
+        )));
     }
     Ok(lines.join("\n"))
 }
@@ -519,6 +598,55 @@ fn collect_file_paths(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn managed_cleanup_paths(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = BTreeSet::new();
+
+    for managed_asset in collect_managed_asset_roots(project_root)? {
+        paths.insert(managed_asset);
+    }
+
+    for relative in [
+        PathBuf::from("ply.toml"),
+        PathBuf::from("ply.lock"),
+        PathBuf::from(".ply"),
+        PathBuf::from("ply-packages").join("example-review"),
+    ] {
+        let path = project_root.join(relative);
+        if path.exists() {
+            paths.insert(path);
+        }
+    }
+
+    Ok(paths.into_iter().collect())
+}
+
+fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    for (adapter, kind) in [
+        (AdapterKind::Codex, AssetKind::Commands),
+        (AdapterKind::Codex, AssetKind::Skills),
+        (AdapterKind::Claude, AssetKind::Commands),
+        (AdapterKind::Claude, AssetKind::Skills),
+    ] {
+        let root = adapter.asset_root(project_root, kind);
+        if !root.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("ply-") {
+                paths.push(entry.path());
+            }
+        }
+    }
+
+    paths.sort();
+    Ok(paths)
+}
+
 fn visit_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(current)? {
         let entry = entry?;
@@ -674,6 +802,54 @@ mod tests {
                 .join("ply-git-review")
                 .join("SKILL.md")
                 .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clean_removes_ply_managed_files_and_preserves_neighbors() -> Result<()> {
+        let temp = make_project()?;
+        init_project(temp.path())?;
+        apply(temp.path())?;
+        write(
+            &temp
+                .path()
+                .join(".agents")
+                .join("skills")
+                .join("keep-me")
+                .join("SKILL.md"),
+            "# keep\n",
+        )?;
+
+        let preview = preview_cleanup(temp.path())?;
+        assert!(preview.items.iter().any(|item| item == "ply.toml"));
+        assert!(preview.items.iter().any(|item| item == ".ply"));
+        assert!(preview.updates_git_excludes);
+
+        let report = clean_project(temp.path())?;
+        assert!(report.removed_items.iter().any(|item| item == "ply.toml"));
+        assert!(report.updated_git_excludes);
+        assert!(!temp.path().join("ply.toml").exists());
+        assert!(!temp.path().join(".ply").exists());
+        assert!(
+            !temp
+                .path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-review-diff")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("keep-me")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            !git::has_ply_excludes(temp.path()),
+            "ply ignore block should be removed"
         );
         Ok(())
     }

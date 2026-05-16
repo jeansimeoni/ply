@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
+use crate::ui;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     Codex,
@@ -57,13 +59,11 @@ impl AssetKind {
 }
 
 pub fn adapter_summary() -> String {
-    let lines = [
-        "codex",
-        "  commands -> .agents/commands",
-        "  skills   -> .agents/skills",
-        "claude",
-        "  commands -> .claude/commands",
-        "  skills   -> .claude/skills",
-    ];
-    lines.join("\n")
+    [
+        ui::list_item("codex: commands -> .agents/commands"),
+        ui::list_item("codex: skills   -> .agents/skills"),
+        ui::list_item("claude: commands -> .claude/commands"),
+        ui::list_item("claude: skills   -> .claude/skills"),
+    ]
+    .join("\n")
 }

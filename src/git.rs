@@ -6,6 +6,9 @@ use std::process::Command;
 
 use crate::config::SourceConfig;
 
+const PLY_EXCLUDE_START: &str = "# ply:start";
+const PLY_EXCLUDE_END: &str = "# ply:end";
+
 pub fn ensure_git_repo(project_root: &Path) -> Result<()> {
     run_git(project_root, ["rev-parse", "--show-toplevel"])?;
     Ok(())
@@ -26,7 +29,7 @@ imp-plan/
 # ply:end
 "#;
     let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    if existing.contains("# ply:start") {
+    if existing.contains(PLY_EXCLUDE_START) {
         return Ok(());
     }
     let mut content = existing;
@@ -36,6 +39,45 @@ imp-plan/
     content.push_str(block);
     fs::write(&exclude_path, content)
         .with_context(|| format!("failed to update {}", exclude_path.display()))
+}
+
+pub fn has_ply_excludes(project_root: &Path) -> bool {
+    let exclude_path = project_root.join(".git").join("info").join("exclude");
+    fs::read_to_string(exclude_path)
+        .map(|content| content.contains(PLY_EXCLUDE_START))
+        .unwrap_or(false)
+}
+
+pub fn remove_local_excludes(project_root: &Path) -> Result<bool> {
+    let exclude_path = project_root.join(".git").join("info").join("exclude");
+    let existing = match fs::read_to_string(&exclude_path) {
+        Ok(content) => content,
+        Err(_) => return Ok(false),
+    };
+    let Some(start) = existing.find(PLY_EXCLUDE_START) else {
+        return Ok(false);
+    };
+    let Some(end_marker) = existing[start..].find(PLY_EXCLUDE_END) else {
+        return Ok(false);
+    };
+    let mut end = start + end_marker + PLY_EXCLUDE_END.len();
+    if existing[end..].starts_with('\n') {
+        end += 1;
+    }
+
+    let mut updated = String::new();
+    updated.push_str(&existing[..start]);
+    updated.push_str(&existing[end..]);
+    let updated = updated.trim_matches('\n');
+    let final_content = if updated.is_empty() {
+        String::new()
+    } else {
+        format!("{updated}\n")
+    };
+
+    fs::write(&exclude_path, final_content)
+        .with_context(|| format!("failed to update {}", exclude_path.display()))?;
+    Ok(true)
 }
 
 pub fn is_tracked(project_root: &Path, path: &Path) -> Result<bool> {

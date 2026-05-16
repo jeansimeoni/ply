@@ -28,6 +28,7 @@ The current MVP supports:
 - `ply list`
 - `ply sources`
 - `ply adapters`
+- `ply clean` / `ply nuke`
 
 Implemented behavior:
 
@@ -37,6 +38,7 @@ Implemented behavior:
 - safe copy-mode exposure for Codex and Claude assets
 - local-only Git ignore management via `.git/info/exclude`
 - tracked-file and unmanaged-file collision checks
+- destructive cleanup flow with confirmation
 
 ## Project manifest
 
