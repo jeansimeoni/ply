@@ -63,6 +63,19 @@ pub fn prompt_yes_no(title: &str, body: &str, default_yes: bool) -> Result<bool,
     Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
+pub fn prompt_choice(title: &str, body: &str, prompt: &str) -> Result<String, io::Error> {
+    let unicode = stdout_supports_unicode();
+    let mut stdout = io::stdout();
+    write_panel(&mut stdout, unicode, Tone::Warning, title, body)?;
+    write!(stdout, "  {prompt}")?;
+    stdout.flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    writeln!(stdout)?;
+    Ok(input.trim().to_ascii_lowercase())
+}
+
 pub fn error_body(error: &Error) -> String {
     let mut body = String::new();
     body.push_str(&error.to_string());

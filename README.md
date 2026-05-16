@@ -39,6 +39,8 @@ Implemented behavior:
 - local-only Git ignore management via `.git/info/exclude`
 - tracked-file and unmanaged-file collision checks
 - destructive cleanup flow with confirmation
+- optional user-global layering from `~/.config/ply`
+- dry-run support for `init`, `apply`, and `clean`
 
 ## Project manifest
 
@@ -91,3 +93,9 @@ overlays:
     kind: skills
     path: .ply/overlays/codex/skills
 ```
+
+## Global layer
+
+User-global Ply config lives under `~/.config/ply` and is layered into project
+composition by default. Projects can opt out with `use_global = false` under
+`[install]`.

@@ -22,6 +22,8 @@ pub struct Manifest {
 pub struct InstallConfig {
     #[serde(default = "default_install_mode")]
     pub mode: String,
+    #[serde(default = "default_use_global")]
+    pub use_global: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +113,10 @@ fn default_install_mode() -> String {
     "copy".to_string()
 }
 
+fn default_use_global() -> bool {
+    true
+}
+
 fn default_adapters() -> Vec<String> {
     vec!["codex".to_string(), "claude".to_string()]
 }
@@ -119,20 +125,38 @@ impl Default for InstallConfig {
     fn default() -> Self {
         Self {
             mode: default_install_mode(),
+            use_global: default_use_global(),
         }
     }
 }
 
 pub fn ensure_initialized(project_root: &Path) -> Result<()> {
+    ensure_initialized_with_hint(project_root, "ply init")
+}
+
+pub fn ensure_initialized_with_hint(project_root: &Path, hint: &str) -> Result<()> {
     let path = project_root.join("ply.toml");
     if path.exists() {
         return Ok(());
     }
 
     Err(anyhow!(
-        "ply is not initialized in {}; run `ply init` to scaffold ply.toml and local state files",
-        project_root.display()
+        "ply is not initialized in {}; run `{hint}` to scaffold ply.toml and local state files",
+        project_root.display(),
     ))
+}
+
+pub fn global_root() -> Result<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+    Ok(std::path::PathBuf::from(home).join(".config").join("ply"))
+}
+
+pub fn load_manifest_if_present(project_root: &Path) -> Result<Option<Manifest>> {
+    let path = project_root.join("ply.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    load_manifest(project_root).map(Some)
 }
 
 pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
@@ -199,6 +223,7 @@ adapters = ["codex", "claude"]
 
 [install]
 mode = "copy"
+use_global = true
 
 [[sources]]
 id = "local"
@@ -215,6 +240,7 @@ adapters = ["codex", "claude"]
 
 [install]
 mode = "copy"
+use_global = true
 "#
     };
     fs::write(&path, template).with_context(|| format!("failed to write {}", path.display()))

@@ -6,6 +6,7 @@ mod ui;
 
 use anyhow::{Result, anyhow};
 use config::InitOptions;
+use ops::{ApplyOptions, CleanOptions, CommandTarget, InitRequest};
 use std::env;
 use std::path::Path;
 use ui::Tone;
@@ -27,35 +28,49 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
 
     match command {
         Command::Init(options) => {
-            let options = options.resolve()?;
-            let report = ops::init_project(project_root, options)?;
-            let mut body = format!("Project root: {}", project_root.display());
-            body.push_str("\n\nCreated:");
-            if report.created_manifest {
-                body.push('\n');
-                body.push_str(&ui::list_item("ply.toml"));
-            } else {
-                body.push('\n');
-                body.push_str(&ui::list_item("reused existing ply.toml"));
-            }
+            let request = options.resolve()?;
+            let report = ops::init_project(project_root, request)?;
+            let mut body = format!("Target root: {}", report.target_root.display());
+            body.push_str("\n\nPlanned:");
             body.push('\n');
-            body.push_str(&ui::list_item("prepared .ply/ local state"));
+            body.push_str(&ui::list_item(if report.created_manifest {
+                "create or reuse ply.toml"
+            } else {
+                "reuse existing ply.toml"
+            }));
+            body.push('\n');
+            body.push_str(&ui::list_item("prepare .ply/ local state"));
             if report.created_local_fixture {
                 body.push('\n');
-                body.push_str(&ui::list_item("scaffolded ply-packages/example-review"));
+                body.push_str(&ui::list_item("scaffold ply-packages/example-review"));
             }
             body.push_str("\n\nConfigured:");
             body.push('\n');
             body.push_str(&ui::list_item(if report.ignore_config {
-                "Ply config is ignored locally via .git/info/exclude"
+                "Ply config is ignored locally when this root is a Git repo"
             } else {
-                "Ply config remains trackable in the repository"
+                "Ply config remains trackable"
             }));
-            ui::print_stdout(Tone::Success, "Initialized Ply project", &body);
+            let title = if report.dry_run {
+                "Init dry-run"
+            } else {
+                "Initialized Ply"
+            };
+            ui::print_stdout(Tone::Success, title, &body);
         }
-        Command::Apply => {
-            let summary = ops::apply(project_root)?;
-            ui::print_stdout(Tone::Success, "Applied managed assets", &summary);
+        Command::Apply(options) => {
+            let report = ops::apply(project_root, options)?;
+            let title = if report.dry_run {
+                "Apply dry-run"
+            } else {
+                "Applied managed assets"
+            };
+            let tone = if report.dry_run {
+                Tone::Info
+            } else {
+                Tone::Success
+            };
+            ui::print_stdout(tone, title, &report.body);
         }
         Command::Diff => {
             let summary = ops::diff(project_root)?;
@@ -65,22 +80,22 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 Tone::Info
             };
             let body = if summary == "no differences" {
-                "Generated and exposed files already match the current manifest."
+                "Managed files match the resolved project and global layers."
             } else {
                 &summary
             };
             ui::print_stdout(tone, "Diff report", body);
         }
-        Command::Doctor => {
-            let summary = ops::doctor(project_root)?;
+        Command::Doctor { target } => {
+            let summary = ops::doctor(project_root, target)?;
             ui::print_stdout(Tone::Info, "Doctor report", &summary);
         }
-        Command::List => {
-            let summary = ops::list_packages(project_root)?;
+        Command::List { target } => {
+            let summary = ops::list_packages(project_root, target)?;
             ui::print_stdout(Tone::Info, "Resolved packages", &summary);
         }
-        Command::Sources => {
-            let summary = ops::list_sources(project_root)?;
+        Command::Sources { target } => {
+            let summary = ops::list_sources(project_root, target)?;
             ui::print_stdout(Tone::Info, "Resolved sources", &summary);
         }
         Command::Adapters => {
@@ -90,11 +105,26 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 &adapters::adapter_summary(),
             );
         }
-        Command::Clean { yes } => {
-            let preview = ops::preview_cleanup(project_root)?;
-            if !yes {
-                let mut body = String::from(
-                    "This will remove Ply-managed files and local state from this project.\n",
+        Command::Clean(options) => {
+            let target = if options.global {
+                CommandTarget::Global
+            } else {
+                CommandTarget::Project
+            };
+            let preview = ops::preview_cleanup(
+                project_root,
+                CleanOptions {
+                    dry_run: options.dry_run,
+                    target,
+                },
+            )?;
+            let title_target = match target {
+                CommandTarget::Project => "this project",
+                CommandTarget::Global => "the user-global Ply layer",
+            };
+            if !options.yes && !options.dry_run {
+                let mut body = format!(
+                    "This will remove Ply-managed files and local state from {title_target}.\n"
                 );
                 for item in &preview.items {
                     body.push('\n');
@@ -104,7 +134,7 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                     body.push('\n');
                     body.push_str(&ui::list_item("update .git/info/exclude"));
                 }
-                let confirmed = ui::prompt_confirmation("Remove Ply from this project", &body)
+                let confirmed = ui::prompt_confirmation("Remove Ply-managed files", &body)
                     .map_err(|err| anyhow!("failed to read confirmation: {err}"))?;
                 if !confirmed {
                     ui::print_stdout(Tone::Info, "Cancelled cleanup", "No files were removed.");
@@ -112,12 +142,22 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 }
             }
 
-            let report = ops::clean_project(project_root)?;
+            let report = ops::clean_project(
+                project_root,
+                CleanOptions {
+                    dry_run: options.dry_run,
+                    target,
+                },
+            )?;
             let mut body = String::new();
             if report.removed_items.is_empty() {
-                body.push_str("No Ply-managed files were removed.");
+                body.push_str("No Ply-managed files were found.");
             } else {
-                body.push_str("Removed:");
+                body.push_str(if options.dry_run {
+                    "Would remove:"
+                } else {
+                    "Removed:"
+                });
                 for item in &report.removed_items {
                     body.push('\n');
                     body.push_str(&ui::list_item(item));
@@ -126,15 +166,20 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             if report.updated_git_excludes {
                 body.push_str("\n\nUpdated:");
                 body.push('\n');
-                body.push_str(&ui::list_item(
-                    "removed the Ply block from .git/info/exclude",
-                ));
+                body.push_str(&ui::list_item(if options.dry_run {
+                    "would remove the Ply block from .git/info/exclude"
+                } else {
+                    "removed the Ply block from .git/info/exclude"
+                }));
             }
-            ui::print_stdout(Tone::Warning, "Removed Ply from this project", &body);
+            let title = if options.dry_run {
+                "Cleanup dry-run"
+            } else {
+                "Removed Ply-managed files"
+            };
+            ui::print_stdout(Tone::Warning, title, &body);
         }
-        Command::Help(topic) => {
-            print_help(topic);
-        }
+        Command::Help(topic) => print_help(topic),
     }
 
     Ok(())
@@ -148,13 +193,13 @@ struct Cli {
 #[derive(Debug, Clone)]
 enum Command {
     Init(InitCli),
-    Apply,
+    Apply(ApplyOptions),
     Diff,
-    Doctor,
-    List,
-    Sources,
+    Doctor { target: CommandTarget },
+    List { target: CommandTarget },
+    Sources { target: CommandTarget },
     Adapters,
-    Clean { yes: bool },
+    Clean(CleanCli),
     Help(HelpTopic),
 }
 
@@ -176,16 +221,25 @@ struct InitCli {
     scaffold_local_packages: Option<bool>,
     ignore_config: Option<bool>,
     yes: bool,
+    global: bool,
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CleanCli {
+    yes: bool,
+    global: bool,
+    dry_run: bool,
 }
 
 impl InitCli {
-    fn resolve(self) -> Result<InitOptions> {
+    fn resolve(self) -> Result<InitRequest> {
         let scaffold_local_packages = match self.scaffold_local_packages {
             Some(value) => value,
             None if self.yes => false,
             None => ui::prompt_yes_no(
                 "Scaffold local package source",
-                "Do you want Ply to create a local `ply-packages/` source in this project?\n\nChoose this when you want to bake packages directly into the repository.",
+                "Do you want Ply to create a local `ply-packages/` source in this target?\n\nChoose this when you want to bake packages directly into the target root.",
                 false,
             )
             .map_err(|err| anyhow!("failed to read init option: {err}"))?,
@@ -196,15 +250,23 @@ impl InitCli {
             None if self.yes => false,
             None => ui::prompt_yes_no(
                 "Ignore Ply config locally",
-                "Do you want all Ply files to stay ignored in this clone, including `ply.toml`, `ply.lock`, and `ply-packages/`?",
+                "Do you want all Ply files to stay ignored in this target when it is a Git repo, including `ply.toml`, `ply.lock`, and `ply-packages/`?",
                 false,
             )
             .map_err(|err| anyhow!("failed to read init option: {err}"))?,
         };
 
-        Ok(InitOptions {
-            scaffold_local_packages,
-            ignore_config,
+        Ok(InitRequest {
+            options: InitOptions {
+                scaffold_local_packages,
+                ignore_config,
+            },
+            dry_run: self.dry_run,
+            target: if self.global {
+                CommandTarget::Global
+            } else {
+                CommandTarget::Project
+            },
         })
     }
 }
@@ -213,7 +275,17 @@ impl Command {
     fn requires_init(&self) -> bool {
         matches!(
             self,
-            Self::Apply | Self::Diff | Self::Doctor | Self::List | Self::Sources
+            Self::Apply(_)
+                | Self::Diff
+                | Self::Doctor {
+                    target: CommandTarget::Project
+                }
+                | Self::List {
+                    target: CommandTarget::Project
+                }
+                | Self::Sources {
+                    target: CommandTarget::Project
+                }
         )
     }
 }
@@ -224,15 +296,13 @@ impl Cli {
             None | Some("-h") | Some("--help") => Command::Help(HelpTopic::General),
             Some("help") => Command::Help(parse_help_topic(&args[1..])?),
             Some("init") => parse_init_command(&args[1..])?,
-            Some("apply") => parse_simple_command(&args[1..], Command::Apply, HelpTopic::Apply)?,
-            Some("diff") => parse_simple_command(&args[1..], Command::Diff, HelpTopic::Diff)?,
-            Some("doctor") => parse_simple_command(&args[1..], Command::Doctor, HelpTopic::Doctor)?,
-            Some("list") => parse_simple_command(&args[1..], Command::List, HelpTopic::List)?,
-            Some("sources") => {
-                parse_simple_command(&args[1..], Command::Sources, HelpTopic::Sources)?
-            }
+            Some("apply") => parse_apply_command(&args[1..])?,
+            Some("diff") => parse_diff_command(&args[1..])?,
+            Some("doctor") => parse_targeted_command(&args[1..], "doctor")?,
+            Some("list") => parse_targeted_command(&args[1..], "list")?,
+            Some("sources") => parse_targeted_command(&args[1..], "sources")?,
             Some("adapters") => {
-                parse_simple_command(&args[1..], Command::Adapters, HelpTopic::Adapters)?
+                parse_simple_help_command(&args[1..], Command::Adapters, HelpTopic::Adapters)?
             }
             Some("clean") | Some("nuke") => parse_clean_command(&args[1..])?,
             Some(other) => {
@@ -242,7 +312,6 @@ impl Cli {
                 ));
             }
         };
-
         Ok(Self { command })
     }
 }
@@ -265,7 +334,11 @@ fn parse_help_topic(args: &[String]) -> Result<HelpTopic> {
     }
 }
 
-fn parse_simple_command(args: &[String], command: Command, topic: HelpTopic) -> Result<Command> {
+fn parse_simple_help_command(
+    args: &[String],
+    command: Command,
+    topic: HelpTopic,
+) -> Result<Command> {
     match args {
         [] => Ok(command),
         [flag] if is_help_flag(flag) => Ok(Command::Help(topic)),
@@ -283,22 +356,74 @@ fn parse_init_command(args: &[String]) -> Result<Command> {
             "--ignore-config" => cli.ignore_config = Some(true),
             "--track-config" => cli.ignore_config = Some(false),
             "--yes" | "-y" => cli.yes = true,
+            "--global" | "-g" => cli.global = true,
+            "--dry-run" => cli.dry_run = true,
             other => return Err(anyhow!("unknown flag `{other}`")),
         }
     }
     Ok(Command::Init(cli))
 }
 
-fn parse_clean_command(args: &[String]) -> Result<Command> {
-    let mut yes = false;
+fn parse_apply_command(args: &[String]) -> Result<Command> {
+    let mut options = ApplyOptions {
+        dry_run: false,
+        yes: false,
+    };
     for arg in args {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Clean)),
-            "--yes" | "-y" => yes = true,
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Apply)),
+            "--dry-run" => options.dry_run = true,
+            "--yes" | "-y" => options.yes = true,
             other => return Err(anyhow!("unknown flag `{other}`")),
         }
     }
-    Ok(Command::Clean { yes })
+    Ok(Command::Apply(options))
+}
+
+fn parse_diff_command(args: &[String]) -> Result<Command> {
+    match args {
+        [] => Ok(Command::Diff),
+        [flag] if is_help_flag(flag) => Ok(Command::Help(HelpTopic::Diff)),
+        [other, ..] => Err(anyhow!("unknown flag `{other}`")),
+    }
+}
+
+fn parse_targeted_command(args: &[String], name: &str) -> Result<Command> {
+    let mut target = CommandTarget::Project;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                return Ok(Command::Help(match name {
+                    "doctor" => HelpTopic::Doctor,
+                    "list" => HelpTopic::List,
+                    "sources" => HelpTopic::Sources,
+                    _ => unreachable!(),
+                }));
+            }
+            "--global" | "-g" => target = CommandTarget::Global,
+            other => return Err(anyhow!("unknown flag `{other}`")),
+        }
+    }
+    Ok(match name {
+        "doctor" => Command::Doctor { target },
+        "list" => Command::List { target },
+        "sources" => Command::Sources { target },
+        _ => unreachable!(),
+    })
+}
+
+fn parse_clean_command(args: &[String]) -> Result<Command> {
+    let mut options = CleanCli::default();
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Clean)),
+            "--yes" | "-y" => options.yes = true,
+            "--global" | "-g" => options.global = true,
+            "--dry-run" => options.dry_run = true,
+            other => return Err(anyhow!("unknown flag `{other}`")),
+        }
+    }
+    Ok(Command::Clean(options))
 }
 
 fn is_help_flag(flag: &str) -> bool {
@@ -330,14 +455,14 @@ Usage:
   ply <command> --help
 
 Commands:
-  init       initialize Ply in the current project
-  apply      resolve packages, render generated output, and expose managed assets
-  diff       compare desired output with current generated/exposed state
+  init       initialize Ply in the project or global root
+  apply      resolve packages, preview or write managed assets
+  diff       show managed content drift with layer origin context
   doctor     validate manifest, sources, package layout, and git safety
   list       show resolved packages
   sources    show configured sources and pinned revisions
   adapters   show supported adapters
-  clean      remove Ply-managed files from this project
+  clean      remove Ply-managed files from the project or global root
   nuke       alias for clean
   help       show this help or help for a specific command
 "#
@@ -349,17 +474,21 @@ Commands:
 Options:
   --with-packages     scaffold a local `ply-packages/` source
   --without-packages  do not create a local package source
-  --ignore-config     keep `ply.toml`, `ply.lock`, `ply-packages/`, and `.ply/` ignored locally
-  --track-config      keep Ply configuration trackable in the repository
+  --ignore-config     keep Ply config ignored locally when the target is a Git repo
+  --track-config      keep Ply configuration trackable
+  --global, -g        target the user-global Ply root
+  --dry-run           preview what init would create
   -y, --yes           skip prompts and accept defaults for unspecified options
   -h, --help          show this help
 "#
         }
         HelpTopic::Apply => {
             r#"Usage:
-  ply apply
+  ply apply [options]
 
 Options:
+  --dry-run           preview layering results, planned assets, and drift consent needs
+  -y, --yes           overwrite drifted managed exposed files without prompting
   -h, --help          show this help
 "#
         }
@@ -373,25 +502,28 @@ Options:
         }
         HelpTopic::Doctor => {
             r#"Usage:
-  ply doctor
+  ply doctor [options]
 
 Options:
+  --global, -g        inspect the user-global Ply root
   -h, --help          show this help
 "#
         }
         HelpTopic::List => {
             r#"Usage:
-  ply list
+  ply list [options]
 
 Options:
+  --global, -g        inspect the user-global Ply root
   -h, --help          show this help
 "#
         }
         HelpTopic::Sources => {
             r#"Usage:
-  ply sources
+  ply sources [options]
 
 Options:
+  --global, -g        inspect the user-global Ply root
   -h, --help          show this help
 "#
         }
@@ -409,6 +541,8 @@ Options:
   ply nuke [options]
 
 Options:
+  --global, -g        target the user-global Ply root
+  --dry-run           preview removals without deleting anything
   -y, --yes           skip the destructive confirmation prompt
   -h, --help          show this help
 "#
@@ -424,58 +558,60 @@ mod tests {
     #[test]
     fn commands_that_require_init_return_ply_error() -> Result<()> {
         let temp = TempDir::new()?;
-
         for command in [
-            Command::Apply,
+            Command::Apply(ApplyOptions {
+                dry_run: false,
+                yes: false,
+            }),
             Command::Diff,
-            Command::Doctor,
-            Command::List,
-            Command::Sources,
+            Command::Doctor {
+                target: CommandTarget::Project,
+            },
+            Command::List {
+                target: CommandTarget::Project,
+            },
+            Command::Sources {
+                target: CommandTarget::Project,
+            },
         ] {
             let err = run_command(temp.path(), command).unwrap_err();
             let message = err.to_string();
             assert!(message.contains("ply is not initialized"));
-            assert!(message.contains("ply init"));
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_clean_command_alias_and_yes_flag() -> Result<()> {
-        let cli = Cli::parse(vec!["nuke".to_string(), "--yes".to_string()])?;
-        match cli.command {
-            Command::Clean { yes } => assert!(yes),
-            other => panic!("expected clean command, got {other:?}"),
         }
         Ok(())
     }
 
     #[test]
-    fn parse_init_command_flags() -> Result<()> {
+    fn parse_apply_flags() -> Result<()> {
         let cli = Cli::parse(vec![
-            "init".to_string(),
-            "--with-packages".to_string(),
-            "--ignore-config".to_string(),
+            "apply".to_string(),
+            "--dry-run".to_string(),
             "--yes".to_string(),
         ])?;
         match cli.command {
-            Command::Init(init) => {
-                assert_eq!(init.scaffold_local_packages, Some(true));
-                assert_eq!(init.ignore_config, Some(true));
-                assert!(init.yes);
+            Command::Apply(options) => {
+                assert!(options.dry_run);
+                assert!(options.yes);
             }
-            other => panic!("expected init command, got {other:?}"),
+            other => panic!("expected apply command, got {other:?}"),
         }
         Ok(())
     }
 
     #[test]
-    fn parse_command_specific_help() -> Result<()> {
-        let cli = Cli::parse(vec!["init".to_string(), "--help".to_string()])?;
+    fn parse_global_clean_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "clean".to_string(),
+            "-g".to_string(),
+            "--dry-run".to_string(),
+        ])?;
         match cli.command {
-            Command::Help(HelpTopic::Init) => Ok(()),
-            other => panic!("expected init help, got {other:?}"),
+            Command::Clean(options) => {
+                assert!(options.global);
+                assert!(options.dry_run);
+            }
+            other => panic!("expected clean command, got {other:?}"),
         }
+        Ok(())
     }
 }

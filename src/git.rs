@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{InitOptions, SourceConfig};
 
@@ -14,7 +15,14 @@ pub fn ensure_git_repo(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn is_git_repo(project_root: &Path) -> bool {
+    run_git(project_root, ["rev-parse", "--show-toplevel"]).is_ok()
+}
+
 pub fn ensure_local_excludes(project_root: &Path, options: InitOptions) -> Result<()> {
+    if !is_git_repo(project_root) {
+        return Ok(());
+    }
     let exclude_path = project_root.join(".git").join("info").join("exclude");
     let mut block = String::from(
         r#"# ply:start
@@ -50,6 +58,9 @@ imp-plan/
 }
 
 pub fn has_ply_excludes(project_root: &Path) -> bool {
+    if !is_git_repo(project_root) {
+        return false;
+    }
     let exclude_path = project_root.join(".git").join("info").join("exclude");
     fs::read_to_string(exclude_path)
         .map(|content| content.contains(PLY_EXCLUDE_START))
@@ -57,6 +68,9 @@ pub fn has_ply_excludes(project_root: &Path) -> bool {
 }
 
 pub fn remove_local_excludes(project_root: &Path) -> Result<bool> {
+    if !is_git_repo(project_root) {
+        return Ok(false);
+    }
     let exclude_path = project_root.join(".git").join("info").join("exclude");
     let existing = match fs::read_to_string(&exclude_path) {
         Ok(content) => content,
@@ -179,4 +193,44 @@ where
 fn relative_path<'a>(project_root: &'a Path, path: &'a Path) -> Result<&'a Path> {
     path.strip_prefix(project_root)
         .with_context(|| format!("{} is not under {}", path.display(), project_root.display()))
+}
+
+pub fn diff_contents(current: &[u8], desired: &[u8], label: &str) -> Result<String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!("ply-diff-{}-{stamp}", std::process::id()));
+    fs::create_dir_all(&temp_root)?;
+    let current_path = temp_root.join("current");
+    let desired_path = temp_root.join("desired");
+    fs::write(&current_path, current)?;
+    fs::write(&desired_path, desired)?;
+
+    let output = Command::new("git")
+        .args(["diff", "--no-index", "--no-prefix", "--"])
+        .arg(&current_path)
+        .arg(&desired_path)
+        .output()
+        .context("failed to run `git diff --no-index`")?;
+
+    let _ = fs::remove_dir_all(&temp_root);
+
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(anyhow!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout)
+        .replace(
+            current_path.to_string_lossy().as_ref(),
+            &format!("a/{label}"),
+        )
+        .replace(
+            desired_path.to_string_lossy().as_ref(),
+            &format!("b/{label}"),
+        );
+    Ok(diff.trim().to_string())
 }
