@@ -41,14 +41,19 @@ pub fn prompt_confirmation(title: &str, body: &str) -> Result<bool, io::Error> {
     Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
-pub fn prompt_yes_no(title: &str, body: &str, default_yes: bool) -> Result<bool, io::Error> {
+pub fn prompt_yes_no(
+    title: &str,
+    body: &str,
+    action: &str,
+    default_yes: bool,
+) -> Result<bool, io::Error> {
     let unicode = stdout_supports_unicode();
     let mut stdout = io::stdout();
     write_panel(&mut stdout, unicode, Tone::Info, title, body)?;
     let prompt = if default_yes {
-        "  Enable this option? [Y/n]: "
+        format!("  {action}? [Y/n]: ")
     } else {
-        "  Enable this option? [y/N]: "
+        format!("  {action}? [y/N]: ")
     };
     write!(stdout, "{prompt}")?;
     stdout.flush()?;

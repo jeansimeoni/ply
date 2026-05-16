@@ -240,6 +240,7 @@ impl InitCli {
             None => ui::prompt_yes_no(
                 "Scaffold local package source",
                 "Do you want Ply to create a local `ply-packages/` source in this target?\n\nChoose this when you want to bake packages directly into the target root.",
+                "Create local package source",
                 false,
             )
             .map_err(|err| anyhow!("failed to read init option: {err}"))?,
@@ -251,6 +252,7 @@ impl InitCli {
             None => ui::prompt_yes_no(
                 "Ignore Ply config locally",
                 "Do you want all Ply files to stay ignored in this target when it is a Git repo, including `ply.toml`, `ply.lock`, and `ply-packages/`?",
+                "Keep Ply config ignored locally",
                 false,
             )
             .map_err(|err| anyhow!("failed to read init option: {err}"))?,
