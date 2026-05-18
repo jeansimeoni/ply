@@ -406,18 +406,33 @@ pub fn diff(project_root: &Path) -> Result<String> {
         .map(|owned| project_root.join(&owned.exposed_path))
         .collect();
 
-    let mut lines = Vec::new();
+    let mut generated_changes = Vec::new();
+    let mut exposed_changes = Vec::new();
+    let mut stale_paths = Vec::new();
+    let mut safety_violations = Vec::new();
     for file in &planned_files {
         let generated = generated_abs_path(project_root, file);
         let exposed = exposed_abs_path(project_root, file);
         if !generated.exists() {
-            lines.push(ui::status_line(
+            generated_changes.push(ui::status_line(
                 Tone::Info,
                 &format!("generate {}", file.generated_relative_path.display()),
             ));
         }
+        if git::is_tracked(project_root, &exposed)? {
+            safety_violations.push(ui::status_line(
+                Tone::Warning,
+                &format!("tracked target {}", file.exposed_relative_path.display()),
+            ));
+        }
+        if !git::is_ignored(project_root, &exposed)? {
+            safety_violations.push(ui::status_line(
+                Tone::Warning,
+                &format!("unignored target {}", file.exposed_relative_path.display()),
+            ));
+        }
         if !exposed.exists() {
-            lines.push(ui::status_line(
+            exposed_changes.push(ui::status_line(
                 Tone::Info,
                 &format!("expose {}", file.exposed_relative_path.display()),
             ));
@@ -425,7 +440,7 @@ pub fn diff(project_root: &Path) -> Result<String> {
         }
         let current = fs::read(&exposed)?;
         if current != file.contents {
-            lines.push(ui::status_line(
+            exposed_changes.push(ui::status_line(
                 Tone::Warning,
                 &format!(
                     "drift {} (desired from {}: {})",
@@ -440,20 +455,20 @@ pub fn diff(project_root: &Path) -> Result<String> {
                 &file.exposed_relative_path.to_string_lossy(),
             )?;
             if !diff.is_empty() {
-                lines.push(diff);
+                exposed_changes.push(diff);
             }
         }
     }
 
     for stale in owned_previous.difference(&desired_exposed) {
-        lines.push(ui::status_line(
+        stale_paths.push(ui::status_line(
             Tone::Warning,
             &format!("remove {}", stale.strip_prefix(project_root)?.display()),
         ));
     }
     for generated_path in collect_file_paths(&project_root.join(".ply").join("generated"))? {
         if !desired_generated.contains(&generated_path) {
-            lines.push(ui::status_line(
+            stale_paths.push(ui::status_line(
                 Tone::Warning,
                 &format!(
                     "remove {}",
@@ -463,10 +478,16 @@ pub fn diff(project_root: &Path) -> Result<String> {
         }
     }
 
-    if lines.is_empty() {
+    let rendered = render_report_sections(&[
+        ("Generated changes", generated_changes),
+        ("Exposed changes", exposed_changes),
+        ("Stale managed paths", stale_paths),
+        ("Safety violations", safety_violations),
+    ]);
+    if rendered.is_empty() {
         return Ok("no differences".to_string());
     }
-    Ok(lines.join("\n\n"))
+    Ok(rendered)
 }
 
 pub fn doctor(project_root: &Path, target: CommandTarget) -> Result<String> {
@@ -483,35 +504,62 @@ pub fn doctor(project_root: &Path, target: CommandTarget) -> Result<String> {
         &packages,
         &composition.overlays,
     )?;
-    let mut lines = vec![ui::status_line(Tone::Success, "manifest parsed")];
-    lines.push(ui::status_line(
+    let previous_state = load_state(&root)?;
+    let mut healthy = vec![ui::status_line(Tone::Success, "manifest parsed")];
+    healthy.push(ui::status_line(
         Tone::Success,
         &format!("{} source(s) resolved", sources.len()),
     ));
-    lines.push(ui::status_line(
+    healthy.push(ui::status_line(
         Tone::Success,
         &format!("{} package(s) resolved", packages.len()),
     ));
-    lines.push(ui::status_line(
+    healthy.push(ui::status_line(
         Tone::Success,
         &format!("{} managed file(s) planned", planned_files.len()),
     ));
+    let mut warnings = Vec::new();
+    if !git::has_ply_excludes(&root) {
+        warnings.push(ui::status_line(
+            Tone::Warning,
+            "missing Ply block in .git/info/exclude",
+        ));
+    }
     for file in &planned_files {
         let exposed = exposed_abs_path(&root, file);
         if git::is_tracked(&root, &exposed)? {
-            lines.push(ui::status_line(
+            warnings.push(ui::status_line(
                 Tone::Warning,
                 &format!("tracked target {}", file.exposed_relative_path.display()),
             ));
         }
         if !git::is_ignored(&root, &exposed)? {
-            lines.push(ui::status_line(
+            warnings.push(ui::status_line(
                 Tone::Warning,
                 &format!("unignored target {}", file.exposed_relative_path.display()),
             ));
         }
     }
-    Ok(lines.join("\n"))
+    for owned in &previous_state.owned_paths {
+        let generated = root.join(&owned.generated_path);
+        if !generated.exists() {
+            warnings.push(ui::status_line(
+                Tone::Warning,
+                &format!("state points to missing generated path {}", owned.generated_path),
+            ));
+        }
+        let exposed = root.join(&owned.exposed_path);
+        if !exposed.exists() {
+            warnings.push(ui::status_line(
+                Tone::Warning,
+                &format!("state points to missing exposed path {}", owned.exposed_path),
+            ));
+        }
+    }
+    Ok(render_report_sections(&[
+        ("Healthy checks", healthy),
+        ("Warnings", warnings),
+    ]))
 }
 
 pub fn list_packages(project_root: &Path, target: CommandTarget) -> Result<String> {
@@ -1562,6 +1610,18 @@ fn exposed_abs_path(project_root: &Path, file: &PlannedFile) -> PathBuf {
     project_root.join(&file.exposed_relative_path)
 }
 
+fn render_report_sections(sections: &[(&str, Vec<String>)]) -> String {
+    let mut rendered = Vec::new();
+    for (title, lines) in sections {
+        if lines.is_empty() {
+            continue;
+        }
+        rendered.push(format!("{title}:"));
+        rendered.extend(lines.iter().cloned());
+    }
+    rendered.join("\n\n")
+}
+
 fn content_digest(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -1839,6 +1899,63 @@ mod tests {
         assert!(local_file.contains("Personal note."));
         assert!(local_file.contains(PLY_MANAGED_START));
         assert!(local_file.contains("Work through diffs carefully."));
+        Ok(())
+    }
+
+    #[test]
+    fn diff_groups_exposed_changes() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+        let skill = temp
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("ply-review-diff")
+            .join("SKILL.md");
+        write(&skill, "# changed\n")?;
+
+        let report = diff(temp.path())?;
+        assert!(report.contains("Exposed changes:"));
+        assert!(report.contains("drift .agents/skills/ply-review-diff/SKILL.md"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_warns_when_git_excludes_are_missing() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        crate::git::remove_local_excludes(temp.path())?;
+
+        let report = doctor(temp.path(), CommandTarget::Project)?;
+        assert!(report.contains("Warnings:"));
+        assert!(report.contains("missing Ply block in .git/info/exclude"));
         Ok(())
     }
 }
