@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     #[serde(default = "default_schema_version")]
@@ -91,6 +93,8 @@ pub struct InitOptions {
 pub struct OwnedPath {
     pub adapter: String,
     pub kind: String,
+    #[serde(default)]
+    pub exposure_mode: String,
     pub relative_name: String,
     pub generated_path: String,
     pub exposed_path: String,
@@ -176,8 +180,9 @@ pub fn load_local_overlays(project_root: &Path) -> Result<LocalOverlayConfig> {
     }
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let overlays = serde_yaml::from_str(&content)
+    let overlays: LocalOverlayConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_local_overlays(&overlays)?;
     Ok(overlays)
 }
 
@@ -367,5 +372,38 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_local_overlays(overlays: &LocalOverlayConfig) -> Result<()> {
+    for overlay in &overlays.overlays {
+        let adapter = AdapterKind::parse(&overlay.adapter)?;
+        let kind = AssetKind::parse(&overlay.kind)?;
+        if !adapter.supports(kind) {
+            return Err(anyhow!(
+                "adapter `{}` does not support asset kind `{}`",
+                overlay.adapter,
+                overlay.kind
+            ));
+        }
+        if matches!(adapter.exposure_mode(kind), ExposureMode::GeneratedComposite)
+            && !kind.is_directory_based()
+            && !overlay.path.ends_with(".md")
+        {
+            return Err(anyhow!(
+                "overlay `{}` for `{}` `{}` must point to a markdown file",
+                overlay.path,
+                overlay.adapter,
+                overlay.kind
+            ));
+        }
+        if overlay.path.trim().is_empty() {
+            return Err(anyhow!(
+                "overlay path cannot be empty for `{}` `{}`",
+                overlay.adapter,
+                overlay.kind
+            ));
+        }
+    }
     Ok(())
 }

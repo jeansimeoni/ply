@@ -31,10 +31,18 @@ pub fn ensure_local_excludes(project_root: &Path, options: InitOptions) -> Resul
 .ply/state.json
 .ply/local.yml
 imp-plan/
+AGENTS.override.md
+CLAUDE.local.md
 .claude/commands/ply-*.md
+.claude/hooks/ply-*
+.claude/output-styles/ply-*
+.claude/rules/ply-*
 .claude/skills/ply-*/
 .agents/commands/ply-*.md
 .agents/skills/ply-*/
+.codex/hooks.json
+.codex/hooks/ply-*
+.codex/rules/ply-*
 "#,
     );
     if options.ignore_config {

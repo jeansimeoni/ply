@@ -13,6 +13,27 @@ pub enum AdapterKind {
 pub enum AssetKind {
     Commands,
     Skills,
+    LocalInstructions,
+    Rules,
+    Hooks,
+    OutputStyles,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposureMode {
+    Direct,
+    InjectBlock,
+    GeneratedComposite,
+}
+
+impl ExposureMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::InjectBlock => "inject-block",
+            Self::GeneratedComposite => "generated-composite",
+        }
+    }
 }
 
 impl AdapterKind {
@@ -31,12 +52,64 @@ impl AdapterKind {
         }
     }
 
-    pub fn asset_root(self, project_root: &Path, kind: AssetKind) -> PathBuf {
+    pub fn supports(self, kind: AssetKind) -> bool {
         match (self, kind) {
-            (Self::Codex, AssetKind::Commands) => project_root.join(".agents").join("commands"),
-            (Self::Codex, AssetKind::Skills) => project_root.join(".agents").join("skills"),
-            (Self::Claude, AssetKind::Commands) => project_root.join(".claude").join("commands"),
-            (Self::Claude, AssetKind::Skills) => project_root.join(".claude").join("skills"),
+            (Self::Codex, AssetKind::Commands)
+            | (Self::Codex, AssetKind::Skills)
+            | (Self::Codex, AssetKind::LocalInstructions)
+            | (Self::Codex, AssetKind::Rules)
+            | (Self::Codex, AssetKind::Hooks)
+            | (Self::Codex, AssetKind::OutputStyles)
+            | (Self::Claude, AssetKind::Commands)
+            | (Self::Claude, AssetKind::Skills)
+            | (Self::Claude, AssetKind::LocalInstructions)
+            | (Self::Claude, AssetKind::Rules)
+            | (Self::Claude, AssetKind::Hooks)
+            | (Self::Claude, AssetKind::OutputStyles) => true,
+        }
+    }
+
+    pub fn exposure_mode(self, kind: AssetKind) -> ExposureMode {
+        match (self, kind) {
+            (Self::Claude, AssetKind::LocalInstructions) => ExposureMode::InjectBlock,
+            (Self::Codex, AssetKind::LocalInstructions)
+            | (Self::Codex, AssetKind::OutputStyles) => ExposureMode::GeneratedComposite,
+            _ => ExposureMode::Direct,
+        }
+    }
+
+    pub fn direct_asset_root(self, project_root: &Path, kind: AssetKind) -> Option<PathBuf> {
+        match (self, kind) {
+            (Self::Codex, AssetKind::Commands) => Some(project_root.join(".agents").join("commands")),
+            (Self::Codex, AssetKind::Skills) => Some(project_root.join(".agents").join("skills")),
+            (Self::Codex, AssetKind::Rules) => Some(project_root.join(".codex").join("rules")),
+            (Self::Codex, AssetKind::Hooks) => Some(project_root.join(".codex").join("hooks")),
+            (Self::Claude, AssetKind::Commands) => Some(project_root.join(".claude").join("commands")),
+            (Self::Claude, AssetKind::Skills) => Some(project_root.join(".claude").join("skills")),
+            (Self::Claude, AssetKind::Rules) => Some(project_root.join(".claude").join("rules")),
+            (Self::Claude, AssetKind::Hooks) => Some(project_root.join(".claude").join("hooks")),
+            (Self::Claude, AssetKind::OutputStyles) => {
+                Some(project_root.join(".claude").join("output-styles"))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn managed_file_path(self, project_root: &Path, kind: AssetKind) -> Option<PathBuf> {
+        match (self, kind) {
+            (Self::Claude, AssetKind::LocalInstructions) => {
+                Some(project_root.join("CLAUDE.local.md"))
+            }
+            (Self::Codex, AssetKind::LocalInstructions)
+            | (Self::Codex, AssetKind::OutputStyles) => Some(project_root.join("AGENTS.override.md")),
+            _ => None,
+        }
+    }
+
+    pub fn hook_registry_path(self, project_root: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Codex => Some(project_root.join(".codex").join("hooks.json")),
+            Self::Claude => None,
         }
     }
 }
@@ -46,6 +119,10 @@ impl AssetKind {
         match value {
             "commands" => Ok(Self::Commands),
             "skills" => Ok(Self::Skills),
+            "local-instructions" => Ok(Self::LocalInstructions),
+            "rules" => Ok(Self::Rules),
+            "hooks" => Ok(Self::Hooks),
+            "output-styles" => Ok(Self::OutputStyles),
             other => Err(anyhow!("unsupported asset kind `{other}`")),
         }
     }
@@ -54,7 +131,19 @@ impl AssetKind {
         match self {
             Self::Commands => "commands",
             Self::Skills => "skills",
+            Self::LocalInstructions => "local-instructions",
+            Self::Rules => "rules",
+            Self::Hooks => "hooks",
+            Self::OutputStyles => "output-styles",
         }
+    }
+
+    pub fn is_directory_based(self) -> bool {
+        !matches!(self, Self::LocalInstructions)
+    }
+
+    pub fn requires_ply_prefix(self) -> bool {
+        !matches!(self, Self::LocalInstructions)
     }
 }
 
@@ -62,8 +151,16 @@ pub fn adapter_summary() -> String {
     [
         ui::list_item("codex: commands -> .agents/commands"),
         ui::list_item("codex: skills   -> .agents/skills"),
+        ui::list_item("codex: local-instructions -> AGENTS.override.md"),
+        ui::list_item("codex: rules -> .codex/rules"),
+        ui::list_item("codex: hooks -> .codex/hooks + .codex/hooks.json"),
+        ui::list_item("codex: output-styles -> AGENTS.override.md"),
         ui::list_item("claude: commands -> .claude/commands"),
         ui::list_item("claude: skills   -> .claude/skills"),
+        ui::list_item("claude: local-instructions -> CLAUDE.local.md"),
+        ui::list_item("claude: rules -> .claude/rules"),
+        ui::list_item("claude: hooks -> .claude/hooks"),
+        ui::list_item("claude: output-styles -> .claude/output-styles"),
     ]
     .join("\n")
 }

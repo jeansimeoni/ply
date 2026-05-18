@@ -331,6 +331,7 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
             .map(|file| OwnedPath {
                 adapter: file.adapter.as_str().to_string(),
                 kind: file.kind.as_str().to_string(),
+                exposure_mode: file.adapter.exposure_mode(file.kind).as_str().to_string(),
                 relative_name: file.relative_name.clone(),
                 generated_path: file.generated_relative_path.to_string_lossy().to_string(),
                 exposed_path: file.exposed_relative_path.to_string_lossy().to_string(),
@@ -809,7 +810,9 @@ fn collect_planned_files(
             .join(adapter.as_str())
             .join(kind.as_str())
             .join(rel);
-        let exposed_root = adapter.asset_root(project_root, kind);
+        let exposed_root = adapter
+            .direct_asset_root(project_root, kind)
+            .ok_or_else(|| anyhow!("no direct root for `{}` `{}`", adapter.as_str(), kind.as_str()))?;
         let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(rel);
 
         if let Some(index) = seen.get(&generated_relative_path).copied() {
@@ -1142,7 +1145,9 @@ fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
         (AdapterKind::Claude, AssetKind::Commands),
         (AdapterKind::Claude, AssetKind::Skills),
     ] {
-        let root = adapter.asset_root(project_root, kind);
+        let Some(root) = adapter.direct_asset_root(project_root, kind) else {
+            continue;
+        };
         if !root.exists() {
             continue;
         }
