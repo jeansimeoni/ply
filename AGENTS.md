@@ -102,6 +102,9 @@ Always maintain a clean ASCII fallback.
 - Do not assume a single agent runtime or vendor-specific layout.
 - Prioritize maintainability and straightforward implementations over cleverness.
 - Avoid over-engineered abstractions until they are justified by real use cases.
+- When application behavior, supported features, or user-facing workflows
+  change, review `README.md` and update it so it reflects the current state of
+  the application.
 
 ## Commit Message Policy
 
