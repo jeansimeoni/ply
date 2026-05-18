@@ -311,6 +311,16 @@ pub fn write_default_package_fixture(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn write_package_manifest(package_root: &Path, name: &str) -> Result<()> {
+    fs::create_dir_all(package_root)?;
+    let path = package_root.join("ply-package.toml");
+    if path.exists() {
+        return Ok(());
+    }
+    let content = format!("name = \"{name}\"\n");
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
 pub fn load_package_manifest(package_root: &Path) -> Result<PackageManifest> {
     let path = package_root.join("ply-package.toml");
     let content =

@@ -5,8 +5,9 @@ mod ops;
 mod ui;
 
 use anyhow::{Result, anyhow};
+use adapters::AssetKind;
 use config::InitOptions;
-use ops::{ApplyOptions, CleanOptions, CommandTarget, InitRequest};
+use ops::{ApplyOptions, CleanOptions, CommandTarget, InitRequest, PackageInitRequest};
 use std::env;
 use std::path::Path;
 use ui::Tone;
@@ -55,6 +56,22 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 "Init dry-run"
             } else {
                 "Initialized Ply"
+            };
+            ui::print_stdout(Tone::Success, title, &body);
+        }
+        Command::InitPackage(options) => {
+            let request = options.resolve(&project_root)?;
+            let report = ops::init_package(project_root, request)?;
+            let mut body = format!("Target root: {}", report.target_root.display());
+            body.push_str("\n\nPlanned:");
+            for path in &report.created_paths {
+                body.push('\n');
+                body.push_str(&ui::list_item(&format!("create {}", path.display())));
+            }
+            let title = if report.dry_run {
+                "Package init dry-run"
+            } else {
+                "Initialized Ply package"
             };
             ui::print_stdout(Tone::Success, title, &body);
         }
@@ -193,6 +210,7 @@ struct Cli {
 #[derive(Debug, Clone)]
 enum Command {
     Init(InitCli),
+    InitPackage(InitPackageCli),
     Apply(ApplyOptions),
     Diff,
     Doctor { target: CommandTarget },
@@ -207,6 +225,7 @@ enum Command {
 enum HelpTopic {
     General,
     Init,
+    InitPackage,
     Apply,
     Diff,
     Doctor,
@@ -229,6 +248,14 @@ struct InitCli {
 struct CleanCli {
     yes: bool,
     global: bool,
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct InitPackageCli {
+    name: Option<String>,
+    path: Option<String>,
+    kinds: Vec<AssetKind>,
     dry_run: bool,
 }
 
@@ -269,6 +296,24 @@ impl InitCli {
             } else {
                 CommandTarget::Project
             },
+        })
+    }
+}
+
+impl InitPackageCli {
+    fn resolve(self, project_root: &Path) -> Result<PackageInitRequest> {
+        let name = self
+            .name
+            .ok_or_else(|| anyhow!("`ply init package` requires `--name`"))?;
+        let path = self
+            .path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| project_root.to_path_buf());
+        Ok(PackageInitRequest {
+            name,
+            path,
+            kinds: self.kinds,
+            dry_run: self.dry_run,
         })
     }
 }
@@ -323,6 +368,7 @@ fn parse_help_topic(args: &[String]) -> Result<HelpTopic> {
         [] => Ok(HelpTopic::General),
         [topic] => match topic.as_str() {
             "init" => Ok(HelpTopic::Init),
+            "init-package" => Ok(HelpTopic::InitPackage),
             "apply" => Ok(HelpTopic::Apply),
             "diff" => Ok(HelpTopic::Diff),
             "doctor" => Ok(HelpTopic::Doctor),
@@ -349,6 +395,11 @@ fn parse_simple_help_command(
 }
 
 fn parse_init_command(args: &[String]) -> Result<Command> {
+    if let Some(subcommand) = args.first() {
+        if subcommand == "package" {
+            return parse_init_package_command(&args[1..]);
+        }
+    }
     let mut cli = InitCli::default();
     for arg in args {
         match arg.as_str() {
@@ -364,6 +415,44 @@ fn parse_init_command(args: &[String]) -> Result<Command> {
         }
     }
     Ok(Command::Init(cli))
+}
+
+fn parse_init_package_command(args: &[String]) -> Result<Command> {
+    let mut cli = InitPackageCli::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--help" | "-h" => return Ok(Command::Help(HelpTopic::InitPackage)),
+            "--name" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("missing value for `--name`"))?;
+                cli.name = Some(value.clone());
+            }
+            "--path" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("missing value for `--path`"))?;
+                cli.path = Some(value.clone());
+            }
+            "--kinds" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("missing value for `--kinds`"))?;
+                cli.kinds = value
+                    .split(',')
+                    .map(|item| AssetKind::parse(item.trim()))
+                    .collect::<Result<Vec<_>>>()?;
+            }
+            "--dry-run" => cli.dry_run = true,
+            other => return Err(anyhow!("unknown flag `{other}`")),
+        }
+        index += 1;
+    }
+    Ok(Command::InitPackage(cli))
 }
 
 fn parse_apply_command(args: &[String]) -> Result<Command> {
@@ -436,6 +525,7 @@ fn print_help(topic: HelpTopic) {
     let title = match topic {
         HelpTopic::General => "Ply CLI",
         HelpTopic::Init => "ply init",
+        HelpTopic::InitPackage => "ply init package",
         HelpTopic::Apply => "ply apply",
         HelpTopic::Diff => "ply diff",
         HelpTopic::Doctor => "ply doctor",
@@ -457,7 +547,7 @@ Usage:
   ply <command> --help
 
 Commands:
-  init       initialize Ply in the project or global root
+  init       initialize Ply in the project, global root, or a package root
   apply      resolve packages, preview or write managed assets
   diff       show managed content drift with layer origin context
   doctor     validate manifest, sources, package layout, and git safety
@@ -472,6 +562,7 @@ Commands:
         HelpTopic::Init => {
             r#"Usage:
   ply init [options]
+  ply init package [options]
 
 Options:
   --with-packages     scaffold a local `ply-packages/` source
@@ -481,6 +572,18 @@ Options:
   --global, -g        target the user-global Ply root
   --dry-run           preview what init would create
   -y, --yes           skip prompts and accept defaults for unspecified options
+  -h, --help          show this help
+"#
+        }
+        HelpTopic::InitPackage => {
+            r#"Usage:
+  ply init package [options]
+
+Options:
+  --name <name>       package name written into ply-package.toml
+  --path <dir>        target package root; defaults to the current directory
+  --kinds <list>      comma-separated asset kinds to scaffold
+  --dry-run           preview what package init would create
   -h, --help          show this help
 "#
         }
@@ -555,6 +658,7 @@ Options:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::AssetKind;
     use tempfile::TempDir;
 
     #[test]
@@ -613,6 +717,31 @@ mod tests {
                 assert!(options.dry_run);
             }
             other => panic!("expected clean command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_init_package_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "init".to_string(),
+            "package".to_string(),
+            "--name".to_string(),
+            "review-tools".to_string(),
+            "--path".to_string(),
+            "./packages/review-tools".to_string(),
+            "--kinds".to_string(),
+            "skills,commands".to_string(),
+            "--dry-run".to_string(),
+        ])?;
+        match cli.command {
+            Command::InitPackage(options) => {
+                assert_eq!(options.name.as_deref(), Some("review-tools"));
+                assert_eq!(options.path.as_deref(), Some("./packages/review-tools"));
+                assert_eq!(options.kinds, vec![AssetKind::Skills, AssetKind::Commands]);
+                assert!(options.dry_run);
+            }
+            other => panic!("expected init package command, got {other:?}"),
         }
         Ok(())
     }

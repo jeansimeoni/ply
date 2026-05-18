@@ -161,6 +161,21 @@ pub struct InitReport {
 }
 
 #[derive(Debug, Clone)]
+pub struct PackageInitRequest {
+    pub name: String,
+    pub path: PathBuf,
+    pub kinds: Vec<AssetKind>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageInitReport {
+    pub target_root: PathBuf,
+    pub created_paths: Vec<PathBuf>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApplyReport {
     pub body: String,
     pub dry_run: bool,
@@ -220,6 +235,87 @@ pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitRep
         target_root,
         dry_run: request.dry_run,
     })
+}
+
+pub fn init_package(project_root: &Path, request: PackageInitRequest) -> Result<PackageInitReport> {
+    let target_root = if request.path.is_absolute() {
+        request.path.clone()
+    } else {
+        project_root.join(&request.path)
+    };
+
+    ensure_package_bootstrap_target(&target_root, &request.kinds)?;
+
+    let mut created_paths = vec![PathBuf::from("ply-package.toml")];
+    for kind in &request.kinds {
+        created_paths.push(PathBuf::from(kind.as_str()));
+    }
+
+    if !request.dry_run {
+        fs::create_dir_all(&target_root)?;
+        config::write_package_manifest(&target_root, &request.name)?;
+        for kind in &request.kinds {
+            if kind.is_directory_based() {
+                fs::create_dir_all(target_root.join(kind.as_str()))?;
+            } else {
+                fs::write(target_root.join("local-instructions.md"), "")?;
+            }
+        }
+    }
+
+    Ok(PackageInitReport {
+        target_root,
+        created_paths,
+        dry_run: request.dry_run,
+    })
+}
+
+fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> Result<()> {
+    if !target_root.exists() {
+        return Ok(());
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(target_root)? {
+        entries.push(entry?);
+    }
+
+    let allowed_names = [".git", ".gitignore", "README", "README.md", "LICENSE", "LICENSE.md"];
+    for entry in &entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !allowed_names.contains(&name.as_ref()) {
+            return Err(anyhow!(
+                "refusing to initialize package in non-empty directory {}; found `{}`",
+                target_root.display(),
+                name
+            ));
+        }
+    }
+
+    if target_root.join("ply-package.toml").exists() {
+        return Err(anyhow!(
+            "refusing to initialize package in {}; ply-package.toml already exists",
+            target_root.display()
+        ));
+    }
+
+    for kind in kinds {
+        let path = if kind.is_directory_based() {
+            target_root.join(kind.as_str())
+        } else {
+            target_root.join("local-instructions.md")
+        };
+        if path.exists() {
+            return Err(anyhow!(
+                "refusing to initialize package in {}; target path `{}` already exists",
+                target_root.display(),
+                path.strip_prefix(target_root).unwrap_or(&path).display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 pub fn preview_cleanup(project_root: &Path, options: CleanOptions) -> Result<CleanupPreview> {
@@ -1897,6 +1993,62 @@ mod tests {
         assert!(local_file.contains("Personal note."));
         assert!(local_file.contains(PLY_MANAGED_START));
         assert!(local_file.contains("Work through diffs carefully."));
+        Ok(())
+    }
+
+    #[test]
+    fn init_package_bootstraps_current_directory() -> Result<()> {
+        let temp = TempDir::new()?;
+        let report = init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: PathBuf::from("."),
+                kinds: vec![AssetKind::Skills, AssetKind::Commands],
+                dry_run: false,
+            },
+        )?;
+        assert_eq!(report.target_root, temp.path());
+        assert!(temp.path().join("ply-package.toml").exists());
+        assert!(temp.path().join("skills").exists());
+        assert!(temp.path().join("commands").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_package_allows_git_bootstrap_files() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir_all(temp.path().join(".git"))?;
+        write(&temp.path().join("README.md"), "# package\n")?;
+        let report = init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: PathBuf::from("."),
+                kinds: vec![],
+                dry_run: false,
+            },
+        )?;
+        assert_eq!(report.target_root, temp.path());
+        assert!(temp.path().join("ply-package.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_package_refuses_unrelated_existing_content() -> Result<()> {
+        let temp = TempDir::new()?;
+        write(&temp.path().join("notes.txt"), "hello\n")?;
+        let err = init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: PathBuf::from("."),
+                kinds: vec![],
+                dry_run: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to initialize package"));
         Ok(())
     }
 
