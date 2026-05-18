@@ -96,7 +96,6 @@ struct PlannedFile {
 #[derive(Debug, Clone)]
 struct DriftedFile {
     exposed_relative_path: PathBuf,
-    exposure_mode: ExposureMode,
     origin_layer: LayerKind,
     origin_detail: String,
     diff: String,
@@ -1330,7 +1329,6 @@ fn collect_exposed_drifts(
         )?;
         drifted.push(DriftedFile {
             exposed_relative_path: file.exposed_relative_path.clone(),
-            exposure_mode: file.exposure_mode,
             origin_layer: file.origin_layer,
             origin_detail: file.origin_detail.clone(),
             diff,

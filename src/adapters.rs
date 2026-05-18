@@ -106,12 +106,6 @@ impl AdapterKind {
         }
     }
 
-    pub fn hook_registry_path(self, project_root: &Path) -> Option<PathBuf> {
-        match self {
-            Self::Codex => Some(project_root.join(".codex").join("hooks.json")),
-            Self::Claude => None,
-        }
-    }
 }
 
 impl AssetKind {
