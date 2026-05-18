@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::adapters::{AdapterKind, AssetKind};
+use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
 use crate::config::{
     self, InitOptions, LocalOverlayConfig, LockedSource, Lockfile, Manifest, OverlayEntry,
     OwnedPath, PackageManifest, PackageSelection, SourceConfig, State, load_local_overlays,
@@ -83,6 +83,7 @@ struct ResolvedPackage {
 struct PlannedFile {
     adapter: AdapterKind,
     kind: AssetKind,
+    exposure_mode: ExposureMode,
     relative_name: String,
     generated_relative_path: PathBuf,
     exposed_relative_path: PathBuf,
@@ -94,10 +95,24 @@ struct PlannedFile {
 #[derive(Debug, Clone)]
 struct DriftedFile {
     exposed_relative_path: PathBuf,
+    exposure_mode: ExposureMode,
     origin_layer: LayerKind,
     origin_detail: String,
     diff: String,
 }
+
+#[derive(Debug, Clone)]
+struct CompositeSection {
+    adapter: AdapterKind,
+    kind: AssetKind,
+    title: String,
+    content: String,
+    origin_layer: LayerKind,
+    origin_detail: String,
+}
+
+const PLY_MANAGED_START: &str = "<!-- ply:start -->";
+const PLY_MANAGED_END: &str = "<!-- ply:end -->";
 
 #[derive(Debug, Clone, Copy)]
 pub enum CommandTarget {
@@ -331,7 +346,7 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
             .map(|file| OwnedPath {
                 adapter: file.adapter.as_str().to_string(),
                 kind: file.kind.as_str().to_string(),
-                exposure_mode: file.adapter.exposure_mode(file.kind).as_str().to_string(),
+                exposure_mode: file.exposure_mode.as_str().to_string(),
                 relative_name: file.relative_name.clone(),
                 generated_path: file.generated_relative_path.to_string_lossy().to_string(),
                 exposed_path: file.exposed_relative_path.to_string_lossy().to_string(),
@@ -731,28 +746,60 @@ fn build_plan(
 ) -> Result<Vec<PlannedFile>> {
     let mut plan = Vec::new();
     let mut seen = BTreeMap::new();
+    let mut sections = Vec::new();
 
     for adapter_name in adapter_names {
         let adapter = AdapterKind::parse(adapter_name)?;
         for package in packages {
             let base = package.root.join(adapter.as_str());
-            for kind in [AssetKind::Commands, AssetKind::Skills] {
+            for kind in [
+                AssetKind::Commands,
+                AssetKind::Skills,
+                AssetKind::Rules,
+                AssetKind::Hooks,
+                AssetKind::OutputStyles,
+            ] {
                 let source_dir = base.join(kind.as_str());
                 if source_dir.exists() {
-                    collect_planned_files(
-                        project_root,
-                        adapter,
-                        kind,
-                        &source_dir,
-                        package.source_layer,
-                        format!(
-                            "package {} from source {}",
-                            package.manifest.name, package.source_id
-                        ),
-                        &mut plan,
-                        &mut seen,
-                    )?;
+                    match adapter.exposure_mode(kind) {
+                        ExposureMode::Direct => collect_planned_files(
+                            project_root,
+                            adapter,
+                            kind,
+                            &source_dir,
+                            package.source_layer,
+                            format!(
+                                "package {} from source {}",
+                                package.manifest.name, package.source_id
+                            ),
+                            &mut plan,
+                            &mut seen,
+                        )?,
+                        ExposureMode::GeneratedComposite => collect_directory_sections(
+                            adapter,
+                            kind,
+                            &source_dir,
+                            package.source_layer,
+                            format!(
+                                "package {} from source {}",
+                                package.manifest.name, package.source_id
+                            ),
+                            &mut sections,
+                        )?,
+                        ExposureMode::InjectBlock => {}
+                    }
                 }
+            }
+            let local_instructions = base.join("local-instructions.md");
+            if local_instructions.exists() {
+                collect_document_section(
+                    adapter,
+                    AssetKind::LocalInstructions,
+                    &local_instructions,
+                    package.source_layer,
+                    format!("package {} from source {}", package.manifest.name, package.source_id),
+                    &mut sections,
+                )?;
             }
         }
     }
@@ -760,23 +807,137 @@ fn build_plan(
     for overlay in overlays {
         let adapter = AdapterKind::parse(&overlay.entry.adapter)?;
         let kind = AssetKind::parse(&overlay.entry.kind)?;
-        let source_dir = overlay.root.join(&overlay.entry.path);
-        if source_dir.exists() {
-            collect_planned_files(
-                project_root,
+        let source_path = overlay.root.join(&overlay.entry.path);
+        if !source_path.exists() {
+            continue;
+        }
+        if kind.is_directory_based() {
+            match adapter.exposure_mode(kind) {
+                ExposureMode::Direct => collect_planned_files(
+                    project_root,
+                    adapter,
+                    kind,
+                    &source_path,
+                    overlay.layer,
+                    format!("overlay {}", overlay.entry.path),
+                    &mut plan,
+                    &mut seen,
+                )?,
+                ExposureMode::GeneratedComposite => collect_directory_sections(
+                    adapter,
+                    kind,
+                    &source_path,
+                    overlay.layer,
+                    format!("overlay {}", overlay.entry.path),
+                    &mut sections,
+                )?,
+                ExposureMode::InjectBlock => {}
+            }
+        } else {
+            collect_document_section(
                 adapter,
                 kind,
-                &source_dir,
+                &source_path,
                 overlay.layer,
                 format!("overlay {}", overlay.entry.path),
-                &mut plan,
-                &mut seen,
+                &mut sections,
             )?;
         }
     }
 
+    let direct_plan_snapshot = plan.clone();
+    append_managed_file_plans(project_root, &sections, &direct_plan_snapshot, &mut plan)?;
+
     plan.sort_by(|a, b| a.generated_relative_path.cmp(&b.generated_relative_path));
     Ok(plan)
+}
+
+fn append_managed_file_plans(
+    project_root: &Path,
+    sections: &[CompositeSection],
+    existing_plan: &[PlannedFile],
+    plan: &mut Vec<PlannedFile>,
+) -> Result<()> {
+    let claude_sections: Vec<_> = sections
+        .iter()
+        .filter(|section| section.adapter == AdapterKind::Claude)
+        .cloned()
+        .collect();
+    if !claude_sections.is_empty() {
+        let target = AdapterKind::Claude
+            .managed_file_path(project_root, AssetKind::LocalInstructions)
+            .expect("claude local instructions target");
+        let existing = fs::read_to_string(&target).ok();
+        let rendered = render_claude_local_instructions(existing.as_deref(), &claude_sections);
+        plan.push(PlannedFile {
+            adapter: AdapterKind::Claude,
+            kind: AssetKind::LocalInstructions,
+            exposure_mode: ExposureMode::InjectBlock,
+            relative_name: "CLAUDE.local.md".to_string(),
+            generated_relative_path: PathBuf::from(".ply")
+                .join("generated")
+                .join("claude")
+                .join("CLAUDE.local.md"),
+            exposed_relative_path: PathBuf::from("CLAUDE.local.md"),
+            contents: rendered.into_bytes(),
+            origin_layer: LayerKind::Project,
+            origin_detail: format!("{} ply-managed section(s)", claude_sections.len()),
+        });
+    }
+
+    let codex_sections: Vec<_> = sections
+        .iter()
+        .filter(|section| {
+            section.adapter == AdapterKind::Codex
+                && matches!(
+                    section.kind,
+                    AssetKind::LocalInstructions | AssetKind::OutputStyles
+                )
+        })
+        .cloned()
+        .collect();
+    if !codex_sections.is_empty() {
+        let rendered = render_codex_override(project_root, &codex_sections)?;
+        plan.push(PlannedFile {
+            adapter: AdapterKind::Codex,
+            kind: AssetKind::LocalInstructions,
+            exposure_mode: ExposureMode::GeneratedComposite,
+            relative_name: "AGENTS.override.md".to_string(),
+            generated_relative_path: PathBuf::from(".ply")
+                .join("generated")
+                .join("codex")
+                .join("AGENTS.override.md"),
+            exposed_relative_path: PathBuf::from("AGENTS.override.md"),
+            contents: rendered.into_bytes(),
+            origin_layer: LayerKind::Project,
+            origin_detail: format!("{} ply-managed section(s)", codex_sections.len()),
+        });
+    }
+
+    let codex_hook_files: Vec<_> = existing_plan
+        .iter()
+        .filter(|file| file.adapter == AdapterKind::Codex && file.kind == AssetKind::Hooks)
+        .cloned()
+        .collect();
+    if !codex_hook_files.is_empty() {
+        let rendered = render_codex_hook_registry(&codex_hook_files);
+        plan.push(PlannedFile {
+            adapter: AdapterKind::Codex,
+            kind: AssetKind::Hooks,
+            exposure_mode: ExposureMode::GeneratedComposite,
+            relative_name: "hooks.json".to_string(),
+            generated_relative_path: PathBuf::from(".ply")
+                .join("generated")
+                .join("codex")
+                .join("hooks.json"),
+            exposed_relative_path: PathBuf::from(".codex").join("hooks.json"),
+            contents: rendered.into_bytes(),
+            origin_layer: LayerKind::Project,
+            origin_detail: format!("{} codex hook registration(s)", codex_hook_files.len()),
+        });
+    }
+
+    Ok(())
 }
 
 fn collect_planned_files(
@@ -798,7 +959,7 @@ fn collect_planned_files(
             .as_os_str()
             .to_string_lossy()
             .to_string();
-        if !top_level_name.starts_with("ply-") {
+        if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
             return Err(anyhow!(
                 "managed asset `{}` must use the `ply-` prefix",
                 rel.display()
@@ -819,6 +980,7 @@ fn collect_planned_files(
             plan[index] = PlannedFile {
                 adapter,
                 kind,
+                exposure_mode: ExposureMode::Direct,
                 relative_name: top_level_name,
                 generated_relative_path,
                 exposed_relative_path,
@@ -832,6 +994,7 @@ fn collect_planned_files(
             plan.push(PlannedFile {
                 adapter,
                 kind,
+                exposure_mode: ExposureMode::Direct,
                 relative_name: top_level_name,
                 generated_relative_path,
                 exposed_relative_path,
@@ -842,6 +1005,173 @@ fn collect_planned_files(
         }
     }
     Ok(())
+}
+
+fn collect_document_section(
+    adapter: AdapterKind,
+    kind: AssetKind,
+    source_file: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    sections: &mut Vec<CompositeSection>,
+) -> Result<()> {
+    let content = fs::read_to_string(source_file)?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    sections.push(CompositeSection {
+        adapter,
+        kind,
+        title: source_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(kind.as_str())
+            .to_string(),
+        content,
+        origin_layer,
+        origin_detail,
+    });
+    Ok(())
+}
+
+fn collect_directory_sections(
+    adapter: AdapterKind,
+    kind: AssetKind,
+    source_dir: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    sections: &mut Vec<CompositeSection>,
+) -> Result<()> {
+    for file in collect_file_paths(source_dir)? {
+        let rel = file.strip_prefix(source_dir)?;
+        let top_level_name = rel
+            .components()
+            .next()
+            .ok_or_else(|| anyhow!("empty relative path under {}", source_dir.display()))?
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
+            return Err(anyhow!(
+                "managed asset `{}` must use the `ply-` prefix",
+                rel.display()
+            ));
+        }
+        let content = fs::read_to_string(&file)?;
+        if content.trim().is_empty() {
+            continue;
+        }
+        sections.push(CompositeSection {
+            adapter,
+            kind,
+            title: rel.display().to_string(),
+            content,
+            origin_layer,
+            origin_detail: origin_detail.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn render_claude_local_instructions(
+    existing: Option<&str>,
+    sections: &[CompositeSection],
+) -> String {
+    let managed = render_managed_block_body("Ply-managed local instructions", sections);
+    upsert_managed_block(existing.unwrap_or_default(), &managed)
+}
+
+fn render_codex_override(project_root: &Path, sections: &[CompositeSection]) -> Result<String> {
+    let repo_owned = project_root.join("AGENTS.md");
+    let repo_content = if repo_owned.exists() {
+        fs::read_to_string(&repo_owned)?
+    } else {
+        String::new()
+    };
+    let local_sections: Vec<_> = sections
+        .iter()
+        .filter(|section| section.kind == AssetKind::LocalInstructions)
+        .cloned()
+        .collect();
+    let output_style_sections: Vec<_> = sections
+        .iter()
+        .filter(|section| section.kind == AssetKind::OutputStyles)
+        .cloned()
+        .collect();
+    let mut parts = vec!["<!-- Generated by ply. Do not edit. -->".to_string()];
+    if !repo_content.trim().is_empty() {
+        parts.push(repo_content.trim_end().to_string());
+    }
+    if !local_sections.is_empty() {
+        parts.push(render_managed_block_body(
+            "Ply-managed local instructions",
+            &local_sections,
+        ));
+    }
+    if !output_style_sections.is_empty() {
+        parts.push(render_managed_block_body(
+            "Ply-managed output styles",
+            &output_style_sections,
+        ));
+    }
+    Ok(parts.join("\n\n") + "\n")
+}
+
+fn render_codex_hook_registry(hook_files: &[PlannedFile]) -> String {
+    let entries = hook_files
+        .iter()
+        .map(|file| {
+            format!(
+                "    {{\n      \"name\": \"{}\",\n      \"path\": \"{}\"\n    }}",
+                file.relative_name,
+                file.exposed_relative_path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("{{\n  \"hooks\": [\n{entries}\n  ]\n}}\n")
+}
+
+fn render_managed_block_body(title: &str, sections: &[CompositeSection]) -> String {
+    let mut lines = vec![format!("## {title}")];
+    for section in sections {
+        lines.push(String::new());
+        lines.push(format!(
+            "### {}: {} ({})",
+            section.kind.as_str(),
+            section.origin_detail,
+            section.origin_layer.as_str()
+        ));
+        lines.push(format!("Source: {}", section.title));
+        lines.push(String::new());
+        lines.push(section.content.trim().to_string());
+    }
+    lines.join("\n")
+}
+
+fn upsert_managed_block(existing: &str, managed_body: &str) -> String {
+    let managed_block = format!("{PLY_MANAGED_START}\n{managed_body}\n{PLY_MANAGED_END}");
+    if let Some(start) = existing.find(PLY_MANAGED_START) {
+        if let Some(end) = existing[start..].find(PLY_MANAGED_END) {
+            let end_index = start + end + PLY_MANAGED_END.len();
+            let mut rendered = String::new();
+            rendered.push_str(existing[..start].trim_end());
+            if !rendered.trim().is_empty() {
+                rendered.push_str("\n\n");
+            }
+            rendered.push_str(&managed_block);
+            let suffix = existing[end_index..].trim();
+            if !suffix.is_empty() {
+                rendered.push_str("\n\n");
+                rendered.push_str(suffix);
+            }
+            return rendered + "\n";
+        }
+    }
+    if existing.trim().is_empty() {
+        return managed_block + "\n";
+    }
+    format!("{}\n\n{}\n", existing.trim_end(), managed_block)
 }
 
 fn render_apply_dry_run(
@@ -932,6 +1262,7 @@ fn collect_exposed_drifts(
         )?;
         drifted.push(DriftedFile {
             exposed_relative_path: file.exposed_relative_path.clone(),
+            exposure_mode: file.exposure_mode,
             origin_layer: file.origin_layer,
             origin_detail: file.origin_detail.clone(),
             diff,
@@ -1024,7 +1355,10 @@ fn verify_exposed_targets(
                 file.exposed_relative_path.display()
             ));
         }
-        if path.exists() && !previous_owned.contains(&path) {
+        if path.exists()
+            && !previous_owned.contains(&path)
+            && file.exposure_mode != ExposureMode::InjectBlock
+        {
             return Err(anyhow!(
                 "refusing to overwrite unmanaged path {}",
                 file.exposed_relative_path.display()
@@ -1087,6 +1421,7 @@ fn prune_empty_parents(project_root: &Path, path: &Path) -> Result<()> {
     let stop_roots = [
         project_root.join(".agents"),
         project_root.join(".claude"),
+        project_root.join(".codex"),
         project_root.join(".ply"),
     ];
     let mut current = path.parent();
@@ -1142,8 +1477,13 @@ fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
     for (adapter, kind) in [
         (AdapterKind::Codex, AssetKind::Commands),
         (AdapterKind::Codex, AssetKind::Skills),
+        (AdapterKind::Codex, AssetKind::Rules),
+        (AdapterKind::Codex, AssetKind::Hooks),
         (AdapterKind::Claude, AssetKind::Commands),
         (AdapterKind::Claude, AssetKind::Skills),
+        (AdapterKind::Claude, AssetKind::Rules),
+        (AdapterKind::Claude, AssetKind::Hooks),
+        (AdapterKind::Claude, AssetKind::OutputStyles),
     ] {
         let Some(root) = adapter.direct_asset_root(project_root, kind) else {
             continue;
@@ -1158,6 +1498,16 @@ fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
             if name.starts_with("ply-") {
                 paths.push(entry.path());
             }
+        }
+    }
+
+    for path in [
+        project_root.join("AGENTS.override.md"),
+        project_root.join("CLAUDE.local.md"),
+        project_root.join(".codex").join("hooks.json"),
+    ] {
+        if path.exists() {
+            paths.push(path);
         }
     }
 
@@ -1215,6 +1565,10 @@ mod tests {
         }
         fs::write(path, content)?;
         Ok(())
+    }
+
+    fn example_package_root(project_root: &Path) -> PathBuf {
+        project_root.join("ply-packages").join("example-review")
     }
 
     fn make_project() -> Result<TempDir> {
@@ -1342,6 +1696,123 @@ mod tests {
             },
         )?;
         assert!(report.body.contains("Managed content drift"));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_generates_codex_override_and_hook_registry() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &temp.path().join("AGENTS.md"),
+            "# Repo instructions\n\nKeep tests passing.\n",
+        )?;
+        write(
+            &package_root.join("codex").join("local-instructions.md"),
+            "Prefer local-first workflows.\n",
+        )?;
+        write(
+            &package_root
+                .join("codex")
+                .join("output-styles")
+                .join("ply-review.md"),
+            "Be concise and bug-focused.\n",
+        )?;
+        write(
+            &package_root
+                .join("codex")
+                .join("rules")
+                .join("ply-safe.md"),
+            "Never mutate tracked files without consent.\n",
+        )?;
+        write(
+            &package_root
+                .join("codex")
+                .join("hooks")
+                .join("ply-lint.sh"),
+            "#!/usr/bin/env bash\necho lint\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let override_file = fs::read_to_string(temp.path().join("AGENTS.override.md"))?;
+        assert!(override_file.contains("# Repo instructions"));
+        assert!(override_file.contains("Prefer local-first workflows."));
+        assert!(override_file.contains("Be concise and bug-focused."));
+
+        let hook_registry = fs::read_to_string(temp.path().join(".codex").join("hooks.json"))?;
+        assert!(hook_registry.contains("\"name\": \"ply-lint.sh\""));
+        assert!(hook_registry.contains(".codex/hooks/ply-lint.sh"));
+        assert!(
+            temp.path()
+                .join(".codex")
+                .join("rules")
+                .join("ply-safe.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_updates_managed_block_in_claude_local_md() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &temp.path().join("CLAUDE.local.md"),
+            "Personal note.\n",
+        )?;
+        write(
+            &package_root.join("claude").join("local-instructions.md"),
+            "Work through diffs carefully.\n",
+        )?;
+        write(
+            &package_root
+                .join("claude")
+                .join("output-styles")
+                .join("ply-review.md"),
+            "Surface findings first.\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let local_file = fs::read_to_string(temp.path().join("CLAUDE.local.md"))?;
+        assert!(local_file.contains("Personal note."));
+        assert!(local_file.contains(PLY_MANAGED_START));
+        assert!(local_file.contains("Work through diffs carefully."));
         Ok(())
     }
 }
