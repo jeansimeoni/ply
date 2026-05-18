@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
@@ -350,6 +351,8 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
                 relative_name: file.relative_name.clone(),
                 generated_path: file.generated_relative_path.to_string_lossy().to_string(),
                 exposed_path: file.exposed_relative_path.to_string_lossy().to_string(),
+                generated_digest: content_digest(&file.contents),
+                exposed_digest: content_digest(&file.contents),
             })
             .collect(),
     };
@@ -726,6 +729,13 @@ fn resolve_composed(
                 selection.selection.source
             ));
         }
+        if !package_root.join("ply-package.toml").exists() {
+            return Err(anyhow!(
+                "package `{}` in source `{}` is missing ply-package.toml",
+                selection.selection.path,
+                selection.selection.source
+            ));
+        }
         let manifest = load_package_manifest(&package_root)?;
         packages.push(ResolvedPackage {
             source_id: selection.selection.source.clone(),
@@ -733,6 +743,16 @@ fn resolve_composed(
             root: package_root,
             manifest,
         });
+    }
+
+    let mut package_names = BTreeSet::new();
+    for package in &packages {
+        if !package_names.insert(package.manifest.name.clone()) {
+            return Err(anyhow!(
+                "duplicate package name `{}` across resolved sources",
+                package.manifest.name
+            ));
+        }
     }
 
     Ok((sources, packages))
@@ -1540,6 +1560,12 @@ fn generated_abs_path(project_root: &Path, file: &PlannedFile) -> PathBuf {
 
 fn exposed_abs_path(project_root: &Path, file: &PlannedFile) -> PathBuf {
     project_root.join(&file.exposed_relative_path)
+}
+
+fn content_digest(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(test)]

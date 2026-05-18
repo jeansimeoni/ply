@@ -98,6 +98,10 @@ pub struct OwnedPath {
     pub relative_name: String,
     pub generated_path: String,
     pub exposed_path: String,
+    #[serde(default)]
+    pub generated_digest: String,
+    #[serde(default)]
+    pub exposed_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,7 +209,9 @@ pub fn load_state(project_root: &Path) -> Result<State> {
 
 pub fn write_lockfile(project_root: &Path, lockfile: &Lockfile) -> Result<()> {
     let path = project_root.join("ply.lock");
-    let content = toml::to_string_pretty(lockfile)?;
+    let mut sorted = lockfile.clone();
+    sorted.sources.sort_by(|a, b| a.id.cmp(&b.id));
+    let content = toml::to_string_pretty(&sorted)?;
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -372,6 +378,18 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
         }
     }
 
+    let mut unique_packages = BTreeSet::new();
+    for package in &manifest.packages {
+        let key = format!("{}::{}", package.source, package.path);
+        if !unique_packages.insert(key) {
+            return Err(anyhow!(
+                "duplicate package selection `{}` from source `{}`",
+                package.path,
+                package.source
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -406,4 +424,52 @@ fn validate_local_overlays(overlays: &LocalOverlayConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_duplicate_package_selection() {
+        let manifest = Manifest {
+            schema_version: 1,
+            install: InstallConfig::default(),
+            adapters: vec!["codex".to_string()],
+            sources: vec![SourceConfig {
+                id: "local".to_string(),
+                kind: "path".to_string(),
+                path: Some("./packages".to_string()),
+                url: None,
+                rev: None,
+            }],
+            packages: vec![
+                PackageSelection {
+                    source: "local".to_string(),
+                    path: "example".to_string(),
+                },
+                PackageSelection {
+                    source: "local".to_string(),
+                    path: "example".to_string(),
+                },
+            ],
+        };
+
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("duplicate package selection"));
+    }
+
+    #[test]
+    fn reject_overlay_for_unknown_asset_kind() {
+        let overlays = LocalOverlayConfig {
+            overlays: vec![OverlayEntry {
+                adapter: "codex".to_string(),
+                kind: "settings".to_string(),
+                path: ".ply/overlays/codex/settings".to_string(),
+            }],
+        };
+
+        let err = validate_local_overlays(&overlays).unwrap_err();
+        assert!(err.to_string().contains("unsupported asset kind"));
+    }
 }
