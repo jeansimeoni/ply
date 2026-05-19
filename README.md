@@ -49,6 +49,7 @@ Implemented behavior:
 - Claude and Codex asset mapping for:
   - `commands`
   - `skills`
+  - `agents`
   - `local-instructions`
   - `rules`
   - `hooks`
@@ -168,6 +169,7 @@ kinds:
 example-review/
 ├── ply-package.toml
 ├── commands/
+├── agents/
 ├── hooks/
 ├── local-instructions.md
 ├── output-styles/
@@ -180,6 +182,7 @@ example-review/
 Managed assets must use the `ply-` prefix at the top level, for example:
 
 - `skills/ply-review-diff/`
+- `agents/ply-reviewer/`
 - `commands/ply-pr-review.md`
 
 ## Per-resource adapter targeting
@@ -193,6 +196,9 @@ To limit a resource to selected adapters, add metadata with a `targets` list:
   `skills/ply-review-diff/ply-asset.toml`
 - file resources such as `commands/ply-pr-review.md` use a sidecar file like
   `commands/ply-pr-review.md.ply-asset.toml`
+
+This is especially useful for adapter-specific kinds such as `agents`, which
+currently map only to Claude.
 
 Example directory metadata:
 
@@ -216,6 +222,7 @@ Claude:
 
 - `commands` -> `.claude/commands/`
 - `skills` -> `.claude/skills/`
+- `agents` -> `.claude/agents/`
 - `local-instructions` -> `CLAUDE.local.md`
 - `rules` -> `.claude/rules/`
 - `hooks` -> `.claude/hooks/`
@@ -233,7 +240,8 @@ Codex:
 Shared package content is exposed according to the consuming project's
 `ply.toml` adapters. The same package `skills/` or `commands/` content can be
 applied into both Claude and Codex when both adapters are enabled in the
-project.
+project. Adapter-specific kinds such as `agents` are exposed only to adapters
+that support them.
 
 Ply is intentionally conservative around repository-owned files:
 
