@@ -126,8 +126,8 @@ Git source `rev` accepts:
 Shared project intent lives in `ply.toml`.
 
 `ply.local.toml` is optional and local-only. Use it to override or add
-sources and packages on one machine without changing the shared project
-manifest.
+sources, packages, and overlays on one machine without changing the shared
+project manifest.
 
 Example:
 
@@ -137,6 +137,11 @@ id = "team"
 kind = "git"
 repo = "../ply-team"
 rev = "HEAD"
+
+[[overlays]]
+adapter = "codex"
+kind = "skills"
+path = ".ply/overlays/codex/skills"
 ```
 
 `ply.ssh.toml` is also optional and local-only. Use it for source-specific
@@ -239,22 +244,27 @@ Ply is intentionally conservative around repository-owned files:
 
 ## Local overlays
 
-Local overlays are configured in `.ply/local.yml` and applied after package
+Local overlays are configured in `ply.local.toml` and applied after package
 composition:
 
-```yaml
-overlays:
-  - adapter: codex
-    kind: skills
-    path: .ply/overlays/codex/skills
-  - adapter: claude
-    kind: local-instructions
-    path: .ply/overlays/claude/local-instructions.md
+```toml
+[[overlays]]
+adapter = "codex"
+kind = "skills"
+path = ".ply/overlays/codex/skills"
+
+[[overlays]]
+adapter = "claude"
+kind = "local-instructions"
+path = ".ply/overlays/claude/local-instructions.md"
 ```
 
-Overlays currently follow the same adapter and asset-kind structure as package
-assets, but overlays themselves remain adapter-specific because they target the
-local consuming project surfaces directly.
+Overlays follow the same adapter and asset-kind structure as exposed assets,
+but they remain adapter-specific because they target the local consuming
+project surfaces directly.
+
+For compatibility, legacy `.ply/local.yml` overlays are still loaded when
+present.
 
 ## Git ignore policy
 
@@ -265,7 +275,6 @@ Ply-managed paths that typically need ignore coverage include:
 
 - `.ply/generated/`
 - `.ply/state.json`
-- `.ply/local.yml`
 - `ply.local.toml`
 - `ply.ssh.toml`
 - `AGENTS.override.md`
