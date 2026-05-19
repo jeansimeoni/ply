@@ -115,6 +115,12 @@ Git source `repo` accepts:
 - GitHub shorthand: `owner/ply-team`
 - full remote: `https://...`, `ssh://...`, or `git@...`
 
+Git source `rev` accepts:
+
+- a branch name such as `main` or `master`
+- a tag
+- a commit SHA
+
 ## Local config layers
 
 Shared project intent lives in `ply.toml`.
