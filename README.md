@@ -177,6 +177,32 @@ Managed assets must use the `ply-` prefix at the top level, for example:
 - `skills/ply-review-diff/`
 - `commands/ply-pr-review.md`
 
+## Per-resource adapter targeting
+
+Package resources target all adapters enabled in the consuming project's
+`ply.toml` by default.
+
+To limit a resource to selected adapters, add metadata with a `targets` list:
+
+- directory resources such as `skills/ply-review-diff/` use
+  `skills/ply-review-diff/ply-asset.toml`
+- file resources such as `commands/ply-pr-review.md` use a sidecar file like
+  `commands/ply-pr-review.md.ply-asset.toml`
+
+Example directory metadata:
+
+```toml
+targets = ["claude"]
+```
+
+Example file metadata:
+
+```toml
+targets = ["codex"]
+```
+
+If `targets` is omitted or empty, the resource applies to all enabled adapters.
+
 ## Adapter mapping
 
 Current MVP adapter mapping:
