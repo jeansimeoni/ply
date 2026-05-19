@@ -914,7 +914,6 @@ fn build_plan(
     for adapter_name in adapter_names {
         let adapter = AdapterKind::parse(adapter_name)?;
         for package in packages {
-            let base = package.root.join(adapter.as_str());
             for kind in [
                 AssetKind::Commands,
                 AssetKind::Skills,
@@ -922,7 +921,7 @@ fn build_plan(
                 AssetKind::Hooks,
                 AssetKind::OutputStyles,
             ] {
-                let source_dir = base.join(kind.as_str());
+                let source_dir = package.root.join(kind.as_str());
                 if source_dir.exists() {
                     match adapter.exposure_mode(kind) {
                         ExposureMode::Direct => collect_planned_files(
@@ -953,7 +952,7 @@ fn build_plan(
                     }
                 }
             }
-            let local_instructions = base.join("local-instructions.md");
+            let local_instructions = package.root.join("local-instructions.md");
             if local_instructions.exists() {
                 collect_document_section(
                     adapter,
@@ -1837,6 +1836,14 @@ mod tests {
                 .join("SKILL.md")
                 .exists()
         );
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
         Ok(())
     }
 
@@ -1899,26 +1906,23 @@ mod tests {
             "# Repo instructions\n\nKeep tests passing.\n",
         )?;
         write(
-            &package_root.join("codex").join("local-instructions.md"),
+            &package_root.join("local-instructions.md"),
             "Prefer local-first workflows.\n",
         )?;
         write(
             &package_root
-                .join("codex")
                 .join("output-styles")
                 .join("ply-review.md"),
             "Be concise and bug-focused.\n",
         )?;
         write(
             &package_root
-                .join("codex")
                 .join("rules")
                 .join("ply-safe.md"),
             "Never mutate tracked files without consent.\n",
         )?;
         write(
             &package_root
-                .join("codex")
                 .join("hooks")
                 .join("ply-lint.sh"),
             "#!/usr/bin/env bash\necho lint\n",
@@ -1970,12 +1974,11 @@ mod tests {
             "Personal note.\n",
         )?;
         write(
-            &package_root.join("claude").join("local-instructions.md"),
+            &package_root.join("local-instructions.md"),
             "Work through diffs carefully.\n",
         )?;
         write(
             &package_root
-                .join("claude")
                 .join("output-styles")
                 .join("ply-review.md"),
             "Surface findings first.\n",

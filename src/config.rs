@@ -277,16 +277,8 @@ pub fn write_default_local_overlay(project_root: &Path) -> Result<()> {
 
 pub fn write_default_package_fixture(project_root: &Path) -> Result<()> {
     let package_dir = project_root.join("ply-packages").join("example-review");
-    let codex_skill = package_dir
-        .join("codex")
-        .join("skills")
-        .join("ply-review-diff");
-    let claude_skill = package_dir
-        .join("claude")
-        .join("skills")
-        .join("ply-review-diff");
-    fs::create_dir_all(&codex_skill)?;
-    fs::create_dir_all(&claude_skill)?;
+    let skill = package_dir.join("skills").join("ply-review-diff");
+    fs::create_dir_all(&skill)?;
     let pkg = package_dir.join("ply-package.toml");
     if !pkg.exists() {
         fs::write(
@@ -294,17 +286,10 @@ pub fn write_default_package_fixture(project_root: &Path) -> Result<()> {
             "name = \"ply-review-diff\"\ndescription = \"Review-diff skill\"\n",
         )?;
     }
-    let codex_readme = codex_skill.join("SKILL.md");
-    if !codex_readme.exists() {
+    let readme = skill.join("SKILL.md");
+    if !readme.exists() {
         fs::write(
-            &codex_readme,
-            "# ply-review-diff\n\nReview a diff with a bug-first mindset.\n",
-        )?;
-    }
-    let claude_readme = claude_skill.join("SKILL.md");
-    if !claude_readme.exists() {
-        fs::write(
-            &claude_readme,
+            &readme,
             "# ply-review-diff\n\nReview a diff with a bug-first mindset.\n",
         )?;
     }
