@@ -170,6 +170,8 @@ example-review/
 ├── ply-package.toml
 ├── commands/
 ├── agents/
+│   └── ply-reviewer/
+│       └── AGENT.md
 ├── hooks/
 ├── local-instructions.md
 ├── output-styles/
@@ -185,6 +187,9 @@ Managed assets must use the `ply-` prefix at the top level, for example:
 - `agents/ply-reviewer/`
 - `commands/ply-pr-review.md`
 
+`agents/` uses shared Markdown authoring. Each agent resource lives in its own
+directory and provides `AGENT.md` as the instruction source document.
+
 ## Per-resource adapter targeting
 
 Package resources target all adapters enabled in the consuming project's
@@ -198,7 +203,7 @@ To limit a resource to selected adapters, add metadata with a `targets` list:
   `commands/ply-pr-review.md.ply-asset.toml`
 
 This is especially useful for adapter-specific kinds such as `agents`, which
-currently map only to Claude.
+render differently per adapter.
 
 Example directory metadata:
 
@@ -232,6 +237,7 @@ Codex:
 
 - `commands` -> `.agents/commands/`
 - `skills` -> `.agents/skills/`
+- `agents` -> generated `.codex/agents/*.toml`
 - `local-instructions` -> `AGENTS.override.md`
 - `rules` -> `.codex/rules/`
 - `hooks` -> `.codex/hooks/` plus `.codex/hooks.json`
@@ -240,8 +246,14 @@ Codex:
 Shared package content is exposed according to the consuming project's
 `ply.toml` adapters. The same package `skills/` or `commands/` content can be
 applied into both Claude and Codex when both adapters are enabled in the
-project. Adapter-specific kinds such as `agents` are exposed only to adapters
-that support them.
+project.
+
+For `agents`, Ply keeps package authoring shared and renders adapter-native
+outputs:
+
+- Claude receives the authored `agents/<name>/` directory directly
+- Codex receives a generated `.codex/agents/<name>.toml` file with `name`,
+  inferred `description`, and `developer_instructions` from `AGENT.md`
 
 Ply is intentionally conservative around repository-owned files:
 
