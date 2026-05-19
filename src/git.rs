@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{InitOptions, SourceConfig};
+use crate::config::{InitOptions, SourceConfig, SshSourceConfig};
 
 const PLY_EXCLUDE_START: &str = "# ply:start";
 const PLY_EXCLUDE_END: &str = "# ply:end";
@@ -30,6 +30,8 @@ pub fn ensure_local_excludes(project_root: &Path, options: InitOptions) -> Resul
 .ply/cache/
 .ply/state.json
 .ply/local.yml
+ply.local.toml
+ply.ssh.toml
 imp-plan/
 AGENTS.override.md
 CLAUDE.local.md
@@ -135,39 +137,117 @@ pub fn is_ignored(project_root: &Path, path: &Path) -> Result<bool> {
 pub fn clone_or_update_source(
     project_root: &Path,
     source: &SourceConfig,
+    ssh_config: Option<&SshSourceConfig>,
 ) -> Result<(PathBuf, String)> {
     let cache_root = project_root.join(".ply").join("cache").join("sources");
     fs::create_dir_all(&cache_root)?;
     let repo_path = cache_root.join(&source.id);
-    let url = source
-        .url
+    let repo = source
+        .repo
         .as_deref()
-        .ok_or_else(|| anyhow!("git source `{}` missing url", source.id))?;
+        .or(source.url.as_deref())
+        .ok_or_else(|| anyhow!("git source `{}` missing repo", source.id))?;
 
+    match resolve_repo_spec(project_root, repo)? {
+        ResolvedRepoSpec::LocalPath(path) => {
+            if let Some(rev) = source.rev.as_deref() {
+                if rev != "HEAD" {
+                    return Err(anyhow!(
+                        "git source `{}` uses a local repo path and does not yet support rev `{}`; omit `rev` or use `HEAD`",
+                        source.id,
+                        rev
+                    ));
+                }
+            }
+            let resolved = run_git(&path, ["rev-parse", "HEAD"])?;
+            Ok((path, resolved.trim().to_string()))
+        }
+        ResolvedRepoSpec::GitHubShorthand(slug) => {
+            let remote = if ssh_config.map(|config| config.use_ssh).unwrap_or(false) {
+                format!("git@github.com:{slug}.git")
+            } else {
+                format!("https://github.com/{slug}")
+            };
+            clone_or_refresh_remote(project_root, source, &repo_path, &remote, ssh_config)
+        }
+        ResolvedRepoSpec::Remote(remote) => {
+            clone_or_refresh_remote(project_root, source, &repo_path, &remote, ssh_config)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ResolvedRepoSpec {
+    LocalPath(PathBuf),
+    GitHubShorthand(String),
+    Remote(String),
+}
+
+fn resolve_repo_spec(project_root: &Path, repo: &str) -> Result<ResolvedRepoSpec> {
+    if repo.starts_with("git@") || repo.starts_with("ssh://") || repo.contains("://") {
+        return Ok(ResolvedRepoSpec::Remote(repo.to_string()));
+    }
+
+    let repo_path = PathBuf::from(repo);
+    if repo_path.is_absolute() || repo.starts_with("./") || repo.starts_with("../") {
+        return Ok(ResolvedRepoSpec::LocalPath(project_root.join(repo).canonicalize().with_context(
+            || format!("failed to resolve local repo path {}", project_root.join(repo).display()),
+        )?));
+    }
+
+    let candidate = project_root.join(repo);
+    if candidate.exists() {
+        return Ok(ResolvedRepoSpec::LocalPath(candidate.canonicalize().with_context(
+            || format!("failed to resolve local repo path {}", candidate.display()),
+        )?));
+    }
+
+    if repo.matches('/').count() == 1 {
+        return Ok(ResolvedRepoSpec::GitHubShorthand(repo.to_string()));
+    }
+
+    Err(anyhow!("unsupported git repo spec `{repo}`"))
+}
+
+fn clone_or_refresh_remote(
+    project_root: &Path,
+    source: &SourceConfig,
+    repo_path: &Path,
+    remote: &str,
+    ssh_config: Option<&SshSourceConfig>,
+) -> Result<(PathBuf, String)> {
+    let ssh_command = ssh_command(ssh_config)?;
     if !repo_path.exists() {
-        let status = Command::new("git")
-            .args(["clone", url])
-            .arg(&repo_path)
-            .current_dir(project_root)
-            .status()
-            .context("failed to run `git clone`")?;
+        let mut command = Command::new("git");
+        command.args(["clone", remote]).arg(repo_path).current_dir(project_root);
+        if let Some(ssh_command) = &ssh_command {
+            command.env("GIT_SSH_COMMAND", ssh_command);
+        }
+        let status = command.status().context("failed to run `git clone`")?;
         if !status.success() {
             return Err(anyhow!("git clone failed for source `{}`", source.id));
         }
     } else {
-        let _ = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(["fetch", "--all", "--tags", "--prune"])
-            .current_dir(&repo_path)
-            .status();
+            .current_dir(repo_path);
+        if let Some(ssh_command) = &ssh_command {
+            command.env("GIT_SSH_COMMAND", ssh_command);
+        }
+        let _ = command.status();
     }
 
     let rev = source.rev.as_deref().unwrap_or("HEAD");
-    let resolved = run_git(&repo_path, ["rev-parse", rev])?;
-    let checkout_status = Command::new("git")
+    let resolved = run_git(repo_path, ["rev-parse", rev])?;
+    let mut checkout = Command::new("git");
+    checkout
         .args(["checkout", "--force", resolved.trim()])
-        .current_dir(&repo_path)
-        .status()
-        .context("failed to run `git checkout`")?;
+        .current_dir(repo_path);
+    if let Some(ssh_command) = &ssh_command {
+        checkout.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let checkout_status = checkout.status().context("failed to run `git checkout`")?;
     if !checkout_status.success() {
         return Err(anyhow!(
             "failed to checkout revision `{}` for source `{}`",
@@ -176,7 +256,78 @@ pub fn clone_or_update_source(
         ));
     }
 
-    Ok((repo_path, resolved.trim().to_string()))
+    Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
+}
+
+fn ssh_command(ssh_config: Option<&SshSourceConfig>) -> Result<Option<String>> {
+    let Some(ssh_config) = ssh_config else {
+        return Ok(None);
+    };
+    let key = match (&ssh_config.ssh_key_path, &ssh_config.ssh_key_env) {
+        (Some(path), None) => Some(expand_tilde(path)?),
+        (None, Some(env_name)) => {
+            let value = std::env::var(env_name).with_context(|| {
+                format!("environment variable `{env_name}` for ply SSH key is not set")
+            })?;
+            Some(expand_tilde(&value)?)
+        }
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "ssh config cannot define both `ssh_key_path` and `ssh_key_env`"
+            ));
+        }
+    };
+
+    Ok(key.map(|path| format!("ssh -i \"{}\" -o IdentitiesOnly=yes", path.display())))
+}
+
+fn expand_tilde(value: &str) -> Result<PathBuf> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME is not set"))?;
+        return Ok(PathBuf::from(home).join(rest));
+    }
+    Ok(PathBuf::from(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_github_shorthand() -> Result<()> {
+        let temp = TempDir::new()?;
+        match resolve_repo_spec(temp.path(), "owner/repo")? {
+            ResolvedRepoSpec::GitHubShorthand(slug) => assert_eq!(slug, "owner/repo"),
+            other => panic!("expected github shorthand, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_existing_relative_path_as_local_repo() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir_all(temp.path().join("owner").join("repo"))?;
+        match resolve_repo_spec(temp.path(), "owner/repo")? {
+            ResolvedRepoSpec::LocalPath(path) => {
+                assert_eq!(path, temp.path().join("owner").join("repo").canonicalize()?)
+            }
+            other => panic!("expected local path, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_ssh_command_from_key_path() -> Result<()> {
+        let command = ssh_command(Some(&SshSourceConfig {
+            use_ssh: true,
+            ssh_key_path: Some("~/.ssh/id_test".to_string()),
+            ssh_key_env: None,
+        }))?;
+        assert!(command.unwrap().contains("IdentitiesOnly=yes"));
+        Ok(())
+    }
 }
 
 pub fn run_git<I, S>(project_root: &Path, args: I) -> Result<String>

@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 
 use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
 use crate::config::{
-    self, InitOptions, LocalOverlayConfig, LockedSource, Lockfile, Manifest, OverlayEntry,
-    OwnedPath, PackageManifest, PackageSelection, SourceConfig, State, load_local_overlays,
-    load_manifest, load_manifest_if_present, load_package_manifest, load_state,
+    self, InitOptions, LocalManifest, LocalOverlayConfig, LocalSourceConfig, LockedSource,
+    Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, PackageSelection,
+    SourceConfig, SshConfigFile, SshSourceConfig, State, load_local_manifest_if_present,
+    load_local_overlays, load_manifest, load_manifest_if_present, load_package_manifest,
+    load_ssh_config_if_present, load_state,
 };
 use crate::git;
 use crate::ui::{self, Tone};
@@ -33,12 +35,14 @@ struct LayerConfig {
     kind: LayerKind,
     root: PathBuf,
     manifest: Manifest,
+    ssh_config: SshConfigFile,
     overlays: LocalOverlayConfig,
 }
 
 #[derive(Debug, Clone)]
 struct MergedSource {
     config: SourceConfig,
+    ssh_config: Option<SshSourceConfig>,
     root: PathBuf,
     layer: LayerKind,
 }
@@ -717,17 +721,24 @@ fn target_root(project_root: &Path, target: CommandTarget) -> Result<PathBuf> {
 
 fn compose_project_config(project_root: &Path) -> Result<ComposedConfig> {
     let project_manifest = load_manifest(project_root)?;
+    let project_local_manifest = load_local_manifest_if_present(project_root)?;
+    let project_ssh_config = load_ssh_config_if_present(project_root)?.unwrap_or_default();
     let project_overlays = load_local_overlays(project_root)?;
+    let project_manifest = merge_local_manifest(project_manifest, project_local_manifest)?;
     let mut layers = Vec::new();
 
     if project_manifest.install.use_global {
         let global_root = config::global_root()?;
         if let Some(global_manifest) = load_manifest_if_present(&global_root)? {
+            let local_manifest = load_local_manifest_if_present(&global_root)?;
+            let ssh_config = load_ssh_config_if_present(&global_root)?.unwrap_or_default();
+            let global_manifest = merge_local_manifest(global_manifest, local_manifest)?;
             let overlays = load_local_overlays(&global_root)?;
             layers.push(LayerConfig {
                 kind: LayerKind::Global,
                 root: global_root,
                 manifest: global_manifest,
+                ssh_config,
                 overlays,
             });
         }
@@ -737,6 +748,7 @@ fn compose_project_config(project_root: &Path) -> Result<ComposedConfig> {
         kind: LayerKind::Project,
         root: project_root.to_path_buf(),
         manifest: project_manifest,
+        ssh_config: project_ssh_config,
         overlays: project_overlays,
     });
 
@@ -751,11 +763,15 @@ fn compose_single_root(root: &Path, layer: LayerKind) -> Result<ComposedConfig> 
     };
     config::ensure_initialized_with_hint(root, hint)?;
     let manifest = load_manifest(root)?;
+    let local_manifest = load_local_manifest_if_present(root)?;
+    let manifest = merge_local_manifest(manifest, local_manifest)?;
+    let ssh_config = load_ssh_config_if_present(root)?.unwrap_or_default();
     let overlays = load_local_overlays(root)?;
     compose_layers(vec![LayerConfig {
         kind: layer,
         root: root.to_path_buf(),
         manifest,
+        ssh_config,
         overlays,
     }])
 }
@@ -779,12 +795,14 @@ fn compose_layers(layers: Vec<LayerConfig>) -> Result<ComposedConfig> {
             if let Some(index) = source_index.insert(source.id.clone(), sources.len()) {
                 sources[index] = MergedSource {
                     config: source.clone(),
+                    ssh_config: layer.ssh_config.sources.get(&source.id).cloned(),
                     root: layer.root.clone(),
                     layer: layer.kind,
                 };
             } else {
                 sources.push(MergedSource {
                     config: source.clone(),
+                    ssh_config: layer.ssh_config.sources.get(&source.id).cloned(),
                     root: layer.root.clone(),
                     layer: layer.kind,
                 });
@@ -844,7 +862,8 @@ fn resolve_composed(
                 }
             }
             "git" => {
-                let (root, revision) = git::clone_or_update_source(&source.root, &source.config)?;
+                let (root, revision) =
+                    git::clone_or_update_source(&source.root, &source.config, source.ssh_config.as_ref())?;
                 ResolvedSource {
                     id: source.config.id.clone(),
                     kind: source.config.kind.clone(),
@@ -1721,6 +1740,65 @@ fn content_digest(bytes: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn merge_local_manifest(
+    mut manifest: Manifest,
+    local_manifest: Option<LocalManifest>,
+) -> Result<Manifest> {
+    let Some(local_manifest) = local_manifest else {
+        return Ok(manifest);
+    };
+
+    let mut source_index = BTreeMap::new();
+    for (index, source) in manifest.sources.iter().enumerate() {
+        source_index.insert(source.id.clone(), index);
+    }
+
+    for local_source in local_manifest.sources {
+        if let Some(index) = source_index.get(&local_source.id).copied() {
+            apply_local_source_override(&mut manifest.sources[index], &local_source);
+        } else {
+            manifest.sources.push(materialize_local_source(local_source)?);
+        }
+    }
+
+    manifest.packages.extend(local_manifest.packages);
+    Ok(manifest)
+}
+
+fn apply_local_source_override(target: &mut SourceConfig, local: &LocalSourceConfig) {
+    if let Some(kind) = &local.kind {
+        target.kind = kind.clone();
+    }
+    if local.path.is_some() {
+        target.path = local.path.clone();
+    }
+    if local.repo.is_some() {
+        target.repo = local.repo.clone();
+        target.url = None;
+    }
+    if local.url.is_some() {
+        target.url = local.url.clone();
+        target.repo = None;
+    }
+    if local.rev.is_some() {
+        target.rev = local.rev.clone();
+    }
+}
+
+fn materialize_local_source(local: LocalSourceConfig) -> Result<SourceConfig> {
+    let kind = local
+        .kind
+        .ok_or_else(|| anyhow!("local source `{}` must define `kind` when adding a new source", local.id))?;
+    Ok(SourceConfig {
+        id: local.id,
+        kind,
+        path: local.path,
+        repo: local.repo,
+        url: local.url,
+        rev: local.rev,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1756,6 +1834,44 @@ mod tests {
         exec_in(temp.path(), &["config", "user.email", "test@example.com"])?;
         exec_in(temp.path(), &["config", "user.name", "Test User"])?;
         Ok(temp)
+    }
+
+    #[test]
+    fn merge_local_manifest_overrides_source_repo() -> Result<()> {
+        let manifest = Manifest {
+            schema_version: 1,
+            install: config::InstallConfig::default(),
+            adapters: vec!["codex".to_string()],
+            sources: vec![SourceConfig {
+                id: "team".to_string(),
+                kind: "git".to_string(),
+                path: None,
+                repo: Some("owner/repo".to_string()),
+                url: None,
+                rev: Some("main".to_string()),
+            }],
+            packages: Vec::new(),
+        };
+        let local = LocalManifest {
+            schema_version: 1,
+            sources: vec![LocalSourceConfig {
+                id: "team".to_string(),
+                kind: None,
+                path: None,
+                repo: Some("git@github.com:owner/repo.git".to_string()),
+                url: None,
+                rev: Some("feature".to_string()),
+            }],
+            packages: Vec::new(),
+        };
+
+        let merged = merge_local_manifest(manifest, Some(local))?;
+        assert_eq!(
+            merged.sources[0].repo.as_deref(),
+            Some("git@github.com:owner/repo.git")
+        );
+        assert_eq!(merged.sources[0].rev.as_deref(), Some("feature"));
+        Ok(())
     }
 
     #[test]

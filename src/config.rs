@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -33,7 +33,35 @@ pub struct SourceConfig {
     pub id: String,
     pub kind: String,
     pub path: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
     pub url: Option<String>,
+    pub rev: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalManifest {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub sources: Vec<LocalSourceConfig>,
+    #[serde(default)]
+    pub packages: Vec<PackageSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalSourceConfig {
+    pub id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
     pub rev: Option<String>,
 }
 
@@ -54,6 +82,22 @@ pub struct OverlayEntry {
     pub adapter: String,
     pub kind: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SshConfigFile {
+    #[serde(default)]
+    pub sources: BTreeMap<String, SshSourceConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SshSourceConfig {
+    #[serde(default)]
+    pub use_ssh: bool,
+    #[serde(default)]
+    pub ssh_key_path: Option<String>,
+    #[serde(default)]
+    pub ssh_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -165,6 +209,32 @@ pub fn load_manifest_if_present(project_root: &Path) -> Result<Option<Manifest>>
         return Ok(None);
     }
     load_manifest(project_root).map(Some)
+}
+
+pub fn load_local_manifest_if_present(project_root: &Path) -> Result<Option<LocalManifest>> {
+    let path = project_root.join("ply.local.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let manifest: LocalManifest =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_local_manifest(&manifest)?;
+    Ok(Some(manifest))
+}
+
+pub fn load_ssh_config_if_present(project_root: &Path) -> Result<Option<SshConfigFile>> {
+    let path = project_root.join("ply.ssh.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let config: SshConfigFile =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_ssh_config(&config)?;
+    Ok(Some(config))
 }
 
 pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
@@ -340,8 +410,14 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 }
             }
             "git" => {
-                if source.url.is_none() {
-                    return Err(anyhow!("git source `{}` is missing `url`", source.id));
+                if source.repo.is_none() && source.url.is_none() {
+                    return Err(anyhow!("git source `{}` is missing `repo`", source.id));
+                }
+                if source.repo.is_some() && source.url.is_some() {
+                    return Err(anyhow!(
+                        "git source `{}` cannot define both `repo` and legacy `url`",
+                        source.id
+                    ));
                 }
             }
             other => {
@@ -421,6 +497,38 @@ fn validate_local_overlays(overlays: &LocalOverlayConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_local_manifest(manifest: &LocalManifest) -> Result<()> {
+    if manifest.schema_version != 1 {
+        return Err(anyhow!(
+            "unsupported schema_version `{}`; only version 1 is supported",
+            manifest.schema_version
+        ));
+    }
+    for source in &manifest.sources {
+        if source.id.trim().is_empty() {
+            return Err(anyhow!("local source id cannot be empty"));
+        }
+        if source.repo.is_some() && source.url.is_some() {
+            return Err(anyhow!(
+                "local source `{}` cannot define both `repo` and legacy `url`",
+                source.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ssh_config(config: &SshConfigFile) -> Result<()> {
+    for (source_id, source) in &config.sources {
+        if source.ssh_key_path.is_some() && source.ssh_key_env.is_some() {
+            return Err(anyhow!(
+                "ssh config for source `{source_id}` cannot define both `ssh_key_path` and `ssh_key_env`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +543,7 @@ mod tests {
                 id: "local".to_string(),
                 kind: "path".to_string(),
                 path: Some("./packages".to_string()),
+                repo: None,
                 url: None,
                 rev: None,
             }],
@@ -466,5 +575,43 @@ mod tests {
 
         let err = validate_local_overlays(&overlays).unwrap_err();
         assert!(err.to_string().contains("unsupported asset kind"));
+    }
+
+    #[test]
+    fn reject_git_source_with_both_repo_and_url() {
+        let manifest = Manifest {
+            schema_version: 1,
+            install: InstallConfig::default(),
+            adapters: vec!["codex".to_string()],
+            sources: vec![SourceConfig {
+                id: "team".to_string(),
+                kind: "git".to_string(),
+                path: None,
+                repo: Some("owner/repo".to_string()),
+                url: Some("https://example.com/repo.git".to_string()),
+                rev: None,
+            }],
+            packages: Vec::new(),
+        };
+
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("both `repo` and legacy `url`"));
+    }
+
+    #[test]
+    fn reject_ssh_config_with_two_key_sources() {
+        let config = SshConfigFile {
+            sources: BTreeMap::from([(
+                "team".to_string(),
+                SshSourceConfig {
+                    use_ssh: true,
+                    ssh_key_path: Some("~/.ssh/id_test".to_string()),
+                    ssh_key_env: Some("PLY_KEY".to_string()),
+                },
+            )]),
+        };
+
+        let err = validate_ssh_config(&config).unwrap_err();
+        assert!(err.to_string().contains("both `ssh_key_path` and `ssh_key_env`"));
     }
 }
