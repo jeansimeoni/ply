@@ -115,6 +115,12 @@ struct CompositeSection {
     origin_detail: String,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AssetMetadata {
+    #[serde(default)]
+    targets: Vec<String>,
+}
+
 const PLY_MANAGED_START: &str = "<!-- ply:start -->";
 const PLY_MANAGED_END: &str = "<!-- ply:end -->";
 
@@ -1131,6 +1137,7 @@ fn collect_planned_files(
     plan: &mut Vec<PlannedFile>,
     seen: &mut BTreeMap<PathBuf, usize>,
 ) -> Result<()> {
+    let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
     for file in collect_file_paths(source_dir)? {
         let rel = file.strip_prefix(source_dir)?;
         let top_level_name = rel
@@ -1140,6 +1147,14 @@ fn collect_planned_files(
             .as_os_str()
             .to_string_lossy()
             .to_string();
+        let metadata = metadata_cache
+            .entry(top_level_name.clone())
+            .or_insert_with(|| load_resource_metadata(source_dir, &top_level_name))
+            .as_ref()
+            .map_err(|err| anyhow!(err.to_string()))?;
+        if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+            continue;
+        }
         if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
             return Err(anyhow!(
                 "managed asset `{}` must use the `ply-` prefix",
@@ -1196,6 +1211,10 @@ fn collect_document_section(
     origin_detail: String,
     sections: &mut Vec<CompositeSection>,
 ) -> Result<()> {
+    let metadata = load_document_metadata(source_file)?;
+    if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+        return Ok(());
+    }
     let content = fs::read_to_string(source_file)?;
     if content.trim().is_empty() {
         return Ok(());
@@ -1223,6 +1242,7 @@ fn collect_directory_sections(
     origin_detail: String,
     sections: &mut Vec<CompositeSection>,
 ) -> Result<()> {
+    let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
     for file in collect_file_paths(source_dir)? {
         let rel = file.strip_prefix(source_dir)?;
         let top_level_name = rel
@@ -1232,6 +1252,14 @@ fn collect_directory_sections(
             .as_os_str()
             .to_string_lossy()
             .to_string();
+        let metadata = metadata_cache
+            .entry(top_level_name.clone())
+            .or_insert_with(|| load_resource_metadata(source_dir, &top_level_name))
+            .as_ref()
+            .map_err(|err| anyhow!(err.to_string()))?;
+        if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+            continue;
+        }
         if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
             return Err(anyhow!(
                 "managed asset `{}` must use the `ply-` prefix",
@@ -1703,6 +1731,9 @@ fn visit_files(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()
         if file_type.is_dir() {
             visit_files(root, &path, out)?;
         } else if file_type.is_file() {
+            if is_asset_metadata_file(&path) {
+                continue;
+            }
             out.push(path);
         } else {
             return Err(anyhow!(
@@ -1738,6 +1769,56 @@ fn content_digest(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+fn is_asset_metadata_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "ply-asset.toml" || name.ends_with(".ply-asset.toml")
+}
+
+fn load_resource_metadata(source_dir: &Path, top_level_name: &str) -> Result<Option<AssetMetadata>> {
+    let top_level_path = source_dir.join(top_level_name);
+    let metadata_path = if top_level_path.is_dir() {
+        top_level_path.join("ply-asset.toml")
+    } else {
+        source_dir.join(format!("{top_level_name}.ply-asset.toml"))
+    };
+    load_asset_metadata(&metadata_path)
+}
+
+fn load_document_metadata(source_file: &Path) -> Result<Option<AssetMetadata>> {
+    let file_name = source_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid source file name at {}", source_file.display()))?;
+    let metadata_path = source_file.with_file_name(format!("{file_name}.ply-asset.toml"));
+    load_asset_metadata(&metadata_path)
+}
+
+fn load_asset_metadata(path: &Path) -> Result<Option<AssetMetadata>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let metadata: AssetMetadata =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(metadata))
+}
+
+fn resource_targets_adapter(metadata: Option<&AssetMetadata>, adapter: AdapterKind) -> Result<bool> {
+    let Some(metadata) = metadata else {
+        return Ok(true);
+    };
+    if metadata.targets.is_empty() {
+        return Ok(true);
+    }
+    for target in &metadata.targets {
+        AdapterKind::parse(target)?;
+    }
+    Ok(metadata.targets.iter().any(|target| target == adapter.as_str()))
 }
 
 fn merge_local_manifest(
@@ -1960,6 +2041,162 @@ mod tests {
                 .join("SKILL.md")
                 .exists()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn resource_metadata_targets_selected_adapters() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &package_root
+                .join("skills")
+                .join("ply-review-diff")
+                .join("ply-asset.toml"),
+            "targets = [\"claude\"]\n",
+        )?;
+        let codex_only = package_root.join("skills").join("ply-codex-only");
+        fs::create_dir_all(&codex_only)?;
+        write(&codex_only.join("SKILL.md"), "# ply-codex-only\n")?;
+        write(
+            &codex_only.join("ply-asset.toml"),
+            "targets = [\"codex\"]\n",
+        )?;
+        let shared = package_root.join("skills").join("ply-shared");
+        fs::create_dir_all(&shared)?;
+        write(&shared.join("SKILL.md"), "# ply-shared\n")?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        assert!(
+            !temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-codex-only")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            !temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-codex-only")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-shared")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-shared")
+                .join("SKILL.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn file_resource_metadata_targets_selected_adapters() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        let commands_dir = package_root.join("commands");
+        fs::create_dir_all(&commands_dir)?;
+        write(
+            &commands_dir.join("ply-codex-only.md"),
+            "Run Codex-specific review steps.\n",
+        )?;
+        write(
+            &commands_dir.join("ply-codex-only.md.ply-asset.toml"),
+            "targets = [\"codex\"]\n",
+        )?;
+        write(
+            &package_root.join("local-instructions.md"),
+            "Shared local instruction.\n",
+        )?;
+        write(
+            &package_root.join("local-instructions.md.ply-asset.toml"),
+            "targets = [\"claude\"]\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("commands")
+                .join("ply-codex-only.md")
+                .exists()
+        );
+        assert!(
+            !temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("ply-codex-only.md")
+                .exists()
+        );
+
+        assert!(!temp.path().join("AGENTS.override.md").exists());
+
+        let claude_local = fs::read_to_string(temp.path().join("CLAUDE.local.md"))?;
+        assert!(claude_local.contains("Shared local instruction."));
         Ok(())
     }
 
