@@ -942,10 +942,14 @@ fn build_plan(
             for kind in [
                 AssetKind::Commands,
                 AssetKind::Skills,
+                AssetKind::Agents,
                 AssetKind::Rules,
                 AssetKind::Hooks,
                 AssetKind::OutputStyles,
             ] {
+                if !adapter.supports(kind) {
+                    continue;
+                }
                 let source_dir = package.root.join(kind.as_str());
                 if source_dir.exists() {
                     match adapter.exposure_mode(kind) {
@@ -1689,6 +1693,7 @@ fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
         (AdapterKind::Codex, AssetKind::Hooks),
         (AdapterKind::Claude, AssetKind::Commands),
         (AdapterKind::Claude, AssetKind::Skills),
+        (AdapterKind::Claude, AssetKind::Agents),
         (AdapterKind::Claude, AssetKind::Rules),
         (AdapterKind::Claude, AssetKind::Hooks),
         (AdapterKind::Claude, AssetKind::OutputStyles),
@@ -2046,6 +2051,52 @@ mod tests {
     }
 
     #[test]
+    fn apply_exposes_claude_agents_only() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        let agent_dir = package_root.join("agents").join("ply-reviewer");
+        fs::create_dir_all(&agent_dir)?;
+        write(&agent_dir.join("AGENT.md"), "# ply-reviewer\n")?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("agents")
+                .join("ply-reviewer")
+                .join("AGENT.md")
+                .exists()
+        );
+        assert!(
+            !temp.path()
+                .join(".agents")
+                .join("agents")
+                .join("ply-reviewer")
+                .join("AGENT.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn resource_metadata_targets_selected_adapters() -> Result<()> {
         let temp = make_project()?;
         init_project(
@@ -2388,6 +2439,22 @@ mod tests {
         )?;
         assert_eq!(report.target_root, temp.path());
         assert!(temp.path().join("ply-package.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn init_package_can_scaffold_agents_directory() -> Result<()> {
+        let temp = TempDir::new()?;
+        init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: PathBuf::from("."),
+                kinds: vec![AssetKind::Agents],
+                dry_run: false,
+            },
+        )?;
+        assert!(temp.path().join("agents").exists());
         Ok(())
     }
 

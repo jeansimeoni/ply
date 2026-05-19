@@ -745,4 +745,23 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn parse_init_package_agents_kind() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "init".to_string(),
+            "package".to_string(),
+            "--name".to_string(),
+            "review-tools".to_string(),
+            "--kinds".to_string(),
+            "agents".to_string(),
+        ])?;
+        match cli.command {
+            Command::InitPackage(options) => {
+                assert_eq!(options.kinds, vec![AssetKind::Agents]);
+            }
+            other => panic!("expected init package command, got {other:?}"),
+        }
+        Ok(())
+    }
 }

@@ -36,6 +36,7 @@ imp-plan/
 AGENTS.override.md
 CLAUDE.local.md
 .claude/commands/ply-*.md
+.claude/agents/ply-*/
 .claude/hooks/ply-*
 .claude/output-styles/ply-*
 .claude/rules/ply-*

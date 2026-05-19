@@ -13,6 +13,7 @@ pub enum AdapterKind {
 pub enum AssetKind {
     Commands,
     Skills,
+    Agents,
     LocalInstructions,
     Rules,
     Hooks,
@@ -62,10 +63,12 @@ impl AdapterKind {
             | (Self::Codex, AssetKind::OutputStyles)
             | (Self::Claude, AssetKind::Commands)
             | (Self::Claude, AssetKind::Skills)
+            | (Self::Claude, AssetKind::Agents)
             | (Self::Claude, AssetKind::LocalInstructions)
             | (Self::Claude, AssetKind::Rules)
             | (Self::Claude, AssetKind::Hooks)
             | (Self::Claude, AssetKind::OutputStyles) => true,
+            _ => false,
         }
     }
 
@@ -86,6 +89,7 @@ impl AdapterKind {
             (Self::Codex, AssetKind::Hooks) => Some(project_root.join(".codex").join("hooks")),
             (Self::Claude, AssetKind::Commands) => Some(project_root.join(".claude").join("commands")),
             (Self::Claude, AssetKind::Skills) => Some(project_root.join(".claude").join("skills")),
+            (Self::Claude, AssetKind::Agents) => Some(project_root.join(".claude").join("agents")),
             (Self::Claude, AssetKind::Rules) => Some(project_root.join(".claude").join("rules")),
             (Self::Claude, AssetKind::Hooks) => Some(project_root.join(".claude").join("hooks")),
             (Self::Claude, AssetKind::OutputStyles) => {
@@ -113,6 +117,7 @@ impl AssetKind {
         match value {
             "commands" => Ok(Self::Commands),
             "skills" => Ok(Self::Skills),
+            "agents" => Ok(Self::Agents),
             "local-instructions" => Ok(Self::LocalInstructions),
             "rules" => Ok(Self::Rules),
             "hooks" => Ok(Self::Hooks),
@@ -125,6 +130,7 @@ impl AssetKind {
         match self {
             Self::Commands => "commands",
             Self::Skills => "skills",
+            Self::Agents => "agents",
             Self::LocalInstructions => "local-instructions",
             Self::Rules => "rules",
             Self::Hooks => "hooks",
@@ -151,6 +157,7 @@ pub fn adapter_summary() -> String {
         ui::list_item("codex: output-styles -> AGENTS.override.md"),
         ui::list_item("claude: commands -> .claude/commands"),
         ui::list_item("claude: skills   -> .claude/skills"),
+        ui::list_item("claude: agents   -> .claude/agents"),
         ui::list_item("claude: local-instructions -> CLAUDE.local.md"),
         ui::list_item("claude: rules -> .claude/rules"),
         ui::list_item("claude: hooks -> .claude/hooks"),
