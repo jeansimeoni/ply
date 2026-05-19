@@ -28,6 +28,7 @@ mise exec -- cargo test
 The current MVP supports:
 
 - `ply init`
+- `ply init package`
 - `ply apply`
 - `ply diff`
 - `ply doctor`
@@ -71,6 +72,17 @@ Ply is designed to coexist with repository-owned agent context.
 - managed assets should use the `ply-` prefix when exposed into adapter-owned
   namespaces
 
+## Core workflows
+
+Ply manages two related but different workflows:
+
+- consuming shared agent resources in a project repo through `ply init` and
+  `ply apply`
+- authoring reusable package content through `ply init package`
+
+`ply init package` is intended for any directory that will become a package
+root, including a standalone folder or a dedicated Git repository.
+
 ## Project manifest
 
 `ply.toml`:
@@ -94,32 +106,26 @@ path = "example-review"
 
 ## Package layout
 
-Each package contains a `ply-package.toml` file plus adapter-specific asset
-trees:
+Each package contains a `ply-package.toml` file plus shared top-level asset
+kinds:
 
 ```txt
 example-review/
 ├── ply-package.toml
-├── codex/
-│   ├── commands/
-│   ├── hooks/
-│   ├── local-instructions.md
-│   ├── output-styles/
-│   ├── rules/
-│   └── skills/
-└── claude/
-    ├── commands/
-    ├── hooks/
-    ├── local-instructions.md
-    ├── output-styles/
-    ├── rules/
-    └── skills/
+├── commands/
+├── hooks/
+├── local-instructions.md
+├── output-styles/
+├── rules/
+└── skills/
+    └── ply-review-diff/
+        └── SKILL.md
 ```
 
 Managed assets must use the `ply-` prefix at the top level, for example:
 
-- `codex/skills/ply-review-diff/`
-- `claude/commands/ply-pr-review.md`
+- `skills/ply-review-diff/`
+- `commands/ply-pr-review.md`
 
 ## Adapter mapping
 
@@ -142,6 +148,11 @@ Codex:
 - `rules` -> `.codex/rules/`
 - `hooks` -> `.codex/hooks/` plus `.codex/hooks.json`
 - `output-styles` -> `AGENTS.override.md`
+
+Shared package content is exposed according to the consuming project's
+`ply.toml` adapters. The same package `skills/` or `commands/` content can be
+applied into both Claude and Codex when both adapters are enabled in the
+project.
 
 Ply is intentionally conservative around repository-owned files:
 
@@ -166,7 +177,8 @@ overlays:
 ```
 
 Overlays currently follow the same adapter and asset-kind structure as package
-assets.
+assets, but overlays themselves remain adapter-specific because they target the
+local consuming project surfaces directly.
 
 ## Git ignore policy
 

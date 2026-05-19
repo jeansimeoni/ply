@@ -2038,6 +2038,25 @@ mod tests {
     }
 
     #[test]
+    fn init_package_accepts_explicit_target_path() -> Result<()> {
+        let temp = TempDir::new()?;
+        let target = temp.path().join("review-tools");
+        let report = init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: target.clone(),
+                kinds: vec![AssetKind::Skills],
+                dry_run: false,
+            },
+        )?;
+        assert_eq!(report.target_root, target);
+        assert!(temp.path().join("review-tools").join("ply-package.toml").exists());
+        assert!(temp.path().join("review-tools").join("skills").exists());
+        Ok(())
+    }
+
+    #[test]
     fn init_package_refuses_unrelated_existing_content() -> Result<()> {
         let temp = TempDir::new()?;
         write(&temp.path().join("notes.txt"), "hello\n")?;
