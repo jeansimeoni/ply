@@ -223,7 +223,7 @@ pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitRep
         )?;
         git::ensure_local_excludes(&target_root, request.options)?;
         config::write_default_manifest(&target_root, request.options)?;
-        config::write_default_local_overlay(&target_root)?;
+        config::write_default_local_manifest(&target_root)?;
         config::write_state(
             &target_root,
             &State {
@@ -1944,6 +1944,7 @@ mod tests {
                 rev: Some("feature".to_string()),
             }],
             packages: Vec::new(),
+            overlays: Vec::new(),
         };
 
         let merged = merge_local_manifest(manifest, Some(local))?;
@@ -1970,7 +1971,7 @@ mod tests {
             },
         )?;
         assert!(report.target_root.join("ply.toml").exists());
-        assert!(report.target_root.join(".ply").join("local.yml").exists());
+        assert!(report.target_root.join("ply.local.toml").exists());
         assert!(
             report
                 .target_root

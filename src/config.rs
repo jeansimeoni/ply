@@ -48,6 +48,8 @@ pub struct LocalManifest {
     pub sources: Vec<LocalSourceConfig>,
     #[serde(default)]
     pub packages: Vec<PackageSelection>,
+    #[serde(default)]
+    pub overlays: Vec<OverlayEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -248,16 +250,23 @@ pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
 }
 
 pub fn load_local_overlays(project_root: &Path) -> Result<LocalOverlayConfig> {
-    let path = project_root.join(".ply").join("local.yml");
-    if !path.exists() {
-        return Ok(LocalOverlayConfig::default());
+    let mut merged = LocalOverlayConfig::default();
+
+    if let Some(local_manifest) = load_local_manifest_if_present(project_root)? {
+        merged.overlays.extend(local_manifest.overlays);
     }
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let overlays: LocalOverlayConfig = serde_yaml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
-    validate_local_overlays(&overlays)?;
-    Ok(overlays)
+
+    let legacy_path = project_root.join(".ply").join("local.yml");
+    if legacy_path.exists() {
+        let content = fs::read_to_string(&legacy_path)
+            .with_context(|| format!("failed to read {}", legacy_path.display()))?;
+        let overlays: LocalOverlayConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse {}", legacy_path.display()))?;
+        merged.overlays.extend(overlays.overlays);
+    }
+
+    validate_local_overlays(&merged)?;
+    Ok(deduplicate_overlays(merged))
 }
 
 pub fn load_state(project_root: &Path) -> Result<State> {
@@ -327,21 +336,17 @@ use_global = true
     fs::write(&path, template).with_context(|| format!("failed to write {}", path.display()))
 }
 
-pub fn write_default_local_overlay(project_root: &Path) -> Result<()> {
-    let ply_dir = project_root.join(".ply");
-    fs::create_dir_all(&ply_dir)?;
-    let path = ply_dir.join("local.yml");
+pub fn write_default_local_manifest(project_root: &Path) -> Result<()> {
+    let path = project_root.join("ply.local.toml");
     if path.exists() {
         return Ok(());
     }
-    let template = r#"overlays:
-  - adapter: codex
-    kind: skills
-    path: .ply/overlays/codex/skills
-  - adapter: claude
-    kind: skills
-    path: .ply/overlays/claude/skills
-"#;
+
+    let template = if let Some(legacy) = load_legacy_local_overlay_config(project_root)? {
+        render_local_manifest_template(&legacy.overlays)
+    } else {
+        render_local_manifest_template(&default_overlay_entries())
+    };
     fs::write(&path, template).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -515,7 +520,61 @@ fn validate_local_manifest(manifest: &LocalManifest) -> Result<()> {
             ));
         }
     }
+    validate_local_overlays(&LocalOverlayConfig {
+        overlays: manifest.overlays.clone(),
+    })?;
     Ok(())
+}
+
+fn load_legacy_local_overlay_config(project_root: &Path) -> Result<Option<LocalOverlayConfig>> {
+    let path = project_root.join(".ply").join("local.yml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let overlays: LocalOverlayConfig = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_local_overlays(&overlays)?;
+    Ok(Some(overlays))
+}
+
+fn default_overlay_entries() -> Vec<OverlayEntry> {
+    vec![
+        OverlayEntry {
+            adapter: "codex".to_string(),
+            kind: "skills".to_string(),
+            path: ".ply/overlays/codex/skills".to_string(),
+        },
+        OverlayEntry {
+            adapter: "claude".to_string(),
+            kind: "skills".to_string(),
+            path: ".ply/overlays/claude/skills".to_string(),
+        },
+    ]
+}
+
+fn render_local_manifest_template(overlays: &[OverlayEntry]) -> String {
+    let mut template = String::from("schema_version = 1\n");
+    for overlay in overlays {
+        template.push_str("\n[[overlays]]\n");
+        template.push_str(&format!("adapter = \"{}\"\n", overlay.adapter));
+        template.push_str(&format!("kind = \"{}\"\n", overlay.kind));
+        template.push_str(&format!("path = \"{}\"\n", overlay.path));
+    }
+    template
+}
+
+fn deduplicate_overlays(config: LocalOverlayConfig) -> LocalOverlayConfig {
+    let mut seen = BTreeSet::new();
+    let mut overlays = Vec::new();
+    for overlay in config.overlays {
+        let key = format!("{}::{}::{}", overlay.adapter, overlay.kind, overlay.path);
+        if seen.insert(key) {
+            overlays.push(overlay);
+        }
+    }
+    LocalOverlayConfig { overlays }
 }
 
 fn validate_ssh_config(config: &SshConfigFile) -> Result<()> {
@@ -532,6 +591,7 @@ fn validate_ssh_config(config: &SshConfigFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn reject_duplicate_package_selection() {
@@ -575,6 +635,75 @@ mod tests {
 
         let err = validate_local_overlays(&overlays).unwrap_err();
         assert!(err.to_string().contains("unsupported asset kind"));
+    }
+
+    #[test]
+    fn local_manifest_accepts_overlays() -> Result<()> {
+        let manifest = LocalManifest {
+            schema_version: 1,
+            sources: Vec::new(),
+            packages: Vec::new(),
+            overlays: vec![OverlayEntry {
+                adapter: "claude".to_string(),
+                kind: "skills".to_string(),
+                path: ".ply/overlays/claude/skills".to_string(),
+            }],
+        };
+
+        validate_local_manifest(&manifest)?;
+        Ok(())
+    }
+
+    #[test]
+    fn load_local_overlays_merges_toml_and_legacy_yaml() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir_all(temp.path().join(".ply"))?;
+        fs::write(
+            temp.path().join("ply.local.toml"),
+            r#"schema_version = 1
+
+[[overlays]]
+adapter = "codex"
+kind = "skills"
+path = ".ply/overlays/codex/skills"
+"#,
+        )?;
+        fs::write(
+            temp.path().join(".ply").join("local.yml"),
+            r#"overlays:
+  - adapter: claude
+    kind: skills
+    path: .ply/overlays/claude/skills
+"#,
+        )?;
+
+        let overlays = load_local_overlays(temp.path())?;
+        assert_eq!(overlays.overlays.len(), 2);
+        assert!(overlays.overlays.iter().any(|overlay| overlay.adapter == "codex"));
+        assert!(overlays.overlays.iter().any(|overlay| overlay.adapter == "claude"));
+        Ok(())
+    }
+
+    #[test]
+    fn write_default_local_manifest_migrates_legacy_overlay_file() -> Result<()> {
+        let temp = TempDir::new()?;
+        fs::create_dir_all(temp.path().join(".ply"))?;
+        fs::write(
+            temp.path().join(".ply").join("local.yml"),
+            r#"overlays:
+  - adapter: claude
+    kind: skills
+    path: .ply/overlays/claude/skills
+"#,
+        )?;
+
+        write_default_local_manifest(temp.path())?;
+
+        let written = fs::read_to_string(temp.path().join("ply.local.toml"))?;
+        assert!(written.contains("[[overlays]]"));
+        assert!(written.contains("adapter = \"claude\""));
+        assert!(written.contains("path = \".ply/overlays/claude/skills\""));
+        Ok(())
     }
 
     #[test]
