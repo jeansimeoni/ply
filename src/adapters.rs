@@ -57,6 +57,7 @@ impl AdapterKind {
         match (self, kind) {
             (Self::Codex, AssetKind::Commands)
             | (Self::Codex, AssetKind::Skills)
+            | (Self::Codex, AssetKind::Agents)
             | (Self::Codex, AssetKind::LocalInstructions)
             | (Self::Codex, AssetKind::Rules)
             | (Self::Codex, AssetKind::Hooks)
@@ -75,7 +76,8 @@ impl AdapterKind {
     pub fn exposure_mode(self, kind: AssetKind) -> ExposureMode {
         match (self, kind) {
             (Self::Claude, AssetKind::LocalInstructions) => ExposureMode::InjectBlock,
-            (Self::Codex, AssetKind::LocalInstructions)
+            (Self::Codex, AssetKind::Agents)
+            | (Self::Codex, AssetKind::LocalInstructions)
             | (Self::Codex, AssetKind::OutputStyles) => ExposureMode::GeneratedComposite,
             _ => ExposureMode::Direct,
         }
@@ -85,6 +87,7 @@ impl AdapterKind {
         match (self, kind) {
             (Self::Codex, AssetKind::Commands) => Some(project_root.join(".agents").join("commands")),
             (Self::Codex, AssetKind::Skills) => Some(project_root.join(".agents").join("skills")),
+            (Self::Codex, AssetKind::Agents) => Some(project_root.join(".codex").join("agents")),
             (Self::Codex, AssetKind::Rules) => Some(project_root.join(".codex").join("rules")),
             (Self::Codex, AssetKind::Hooks) => Some(project_root.join(".codex").join("hooks")),
             (Self::Claude, AssetKind::Commands) => Some(project_root.join(".claude").join("commands")),
@@ -151,6 +154,7 @@ pub fn adapter_summary() -> String {
     [
         ui::list_item("codex: commands -> .agents/commands"),
         ui::list_item("codex: skills   -> .agents/skills"),
+        ui::list_item("codex: agents   -> .codex/agents/*.toml"),
         ui::list_item("codex: local-instructions -> AGENTS.override.md"),
         ui::list_item("codex: rules -> .codex/rules"),
         ui::list_item("codex: hooks -> .codex/hooks + .codex/hooks.json"),

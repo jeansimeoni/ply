@@ -43,6 +43,7 @@ CLAUDE.local.md
 .claude/skills/ply-*/
 .agents/commands/ply-*.md
 .agents/skills/ply-*/
+.codex/agents/ply-*.toml
 .codex/hooks.json
 .codex/hooks/ply-*
 .codex/rules/ply-*

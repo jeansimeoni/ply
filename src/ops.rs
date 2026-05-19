@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -119,6 +120,13 @@ struct CompositeSection {
 struct AssetMetadata {
     #[serde(default)]
     targets: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CodexAgentFile {
+    name: String,
+    description: String,
+    developer_instructions: String,
 }
 
 const PLY_MANAGED_START: &str = "<!-- ply:start -->";
@@ -952,11 +960,9 @@ fn build_plan(
                 }
                 let source_dir = package.root.join(kind.as_str());
                 if source_dir.exists() {
-                    match adapter.exposure_mode(kind) {
-                        ExposureMode::Direct => collect_planned_files(
+                    if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
+                        collect_codex_agent_plans(
                             project_root,
-                            adapter,
-                            kind,
                             &source_dir,
                             package.source_layer,
                             format!(
@@ -965,7 +971,26 @@ fn build_plan(
                             ),
                             &mut plan,
                             &mut seen,
-                        )?,
+                        )?;
+                        continue;
+                    }
+                    match adapter.exposure_mode(kind) {
+                        ExposureMode::Direct => {
+                            let origin_detail = format!(
+                                "package {} from source {}",
+                                package.manifest.name, package.source_id
+                            );
+                            collect_planned_files(
+                                project_root,
+                                adapter,
+                                kind,
+                                &source_dir,
+                                package.source_layer,
+                                origin_detail.clone(),
+                                &mut plan,
+                                &mut seen,
+                            )?;
+                        }
                         ExposureMode::GeneratedComposite => collect_directory_sections(
                             adapter,
                             kind,
@@ -1003,6 +1028,17 @@ fn build_plan(
             continue;
         }
         if kind.is_directory_based() {
+            if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
+                collect_codex_agent_plans(
+                    project_root,
+                    &source_path,
+                    overlay.layer,
+                    format!("overlay {}", overlay.entry.path),
+                    &mut plan,
+                    &mut seen,
+                )?;
+                continue;
+            }
             match adapter.exposure_mode(kind) {
                 ExposureMode::Direct => collect_planned_files(
                     project_root,
@@ -1141,6 +1177,9 @@ fn collect_planned_files(
     plan: &mut Vec<PlannedFile>,
     seen: &mut BTreeMap<PathBuf, usize>,
 ) -> Result<()> {
+    if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
+        return Ok(());
+    }
     let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
     for file in collect_file_paths(source_dir)? {
         let rel = file.strip_prefix(source_dir)?;
@@ -1205,6 +1244,124 @@ fn collect_planned_files(
         }
     }
     Ok(())
+}
+
+fn collect_codex_agent_plans(
+    project_root: &Path,
+    source_dir: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+) -> Result<()> {
+    let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
+    for entry in fs::read_dir(source_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let top_level_name = entry.file_name().to_string_lossy().to_string();
+        let metadata = metadata_cache
+            .entry(top_level_name.clone())
+            .or_insert_with(|| load_resource_metadata(source_dir, &top_level_name))
+            .as_ref()
+            .map_err(|err| anyhow!(err.to_string()))?;
+        if !resource_targets_adapter(metadata.as_ref(), AdapterKind::Codex)? {
+            continue;
+        }
+        if !top_level_name.starts_with("ply-") {
+            return Err(anyhow!(
+                "managed asset `{}` must use the `ply-` prefix",
+                top_level_name
+            ));
+        }
+
+        let agent_instructions = entry.path().join("AGENT.md");
+        if !agent_instructions.exists() {
+            return Err(anyhow!(
+                "agent `{}` is missing AGENT.md",
+                entry.path().strip_prefix(source_dir).unwrap_or(&entry.path()).display()
+            ));
+        }
+
+        let markdown = fs::read_to_string(&agent_instructions)?;
+        let rendered = render_codex_agent_file(&top_level_name, &markdown)?;
+        let generated_relative_path = PathBuf::from(".ply")
+            .join("generated")
+            .join("codex")
+            .join("agents")
+            .join(format!("{top_level_name}.toml"));
+        let exposed_relative_path = PathBuf::from(".codex")
+            .join("agents")
+            .join(format!("{top_level_name}.toml"));
+
+        if let Some(index) = seen.get(&generated_relative_path).copied() {
+            plan[index] = PlannedFile {
+                adapter: AdapterKind::Codex,
+                kind: AssetKind::Agents,
+                exposure_mode: ExposureMode::GeneratedComposite,
+                relative_name: top_level_name,
+                generated_relative_path,
+                exposed_relative_path,
+                contents: rendered.into_bytes(),
+                origin_layer,
+                origin_detail: origin_detail.clone(),
+            };
+        } else {
+            let index = plan.len();
+            seen.insert(generated_relative_path.clone(), index);
+            plan.push(PlannedFile {
+                adapter: AdapterKind::Codex,
+                kind: AssetKind::Agents,
+                exposure_mode: ExposureMode::GeneratedComposite,
+                relative_name: top_level_name,
+                generated_relative_path,
+                exposed_relative_path,
+                contents: rendered.into_bytes(),
+                origin_layer,
+                origin_detail: origin_detail.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn render_codex_agent_file(resource_name: &str, markdown: &str) -> Result<String> {
+    let agent = CodexAgentFile {
+        name: resource_name.to_string(),
+        description: infer_agent_description(resource_name, markdown),
+        developer_instructions: markdown.trim().to_string(),
+    };
+    toml::to_string_pretty(&agent).map_err(Into::into)
+}
+
+fn infer_agent_description(resource_name: &str, markdown: &str) -> String {
+    let mut lines = markdown.lines().peekable();
+    while let Some(line) = lines.peek() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            lines.next();
+            continue;
+        }
+        let mut description = String::new();
+        while let Some(line) = lines.peek() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if !description.is_empty() {
+                description.push(' ');
+            }
+            description.push_str(trimmed);
+            lines.next();
+        }
+        if !description.is_empty() {
+            return description;
+        }
+    }
+
+    format!("Ply-managed agent `{resource_name}`.")
 }
 
 fn collect_document_section(
@@ -1689,6 +1846,7 @@ fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
     for (adapter, kind) in [
         (AdapterKind::Codex, AssetKind::Commands),
         (AdapterKind::Codex, AssetKind::Skills),
+        (AdapterKind::Codex, AssetKind::Agents),
         (AdapterKind::Codex, AssetKind::Rules),
         (AdapterKind::Codex, AssetKind::Hooks),
         (AdapterKind::Claude, AssetKind::Commands),
@@ -2051,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_exposes_claude_agents_only() -> Result<()> {
+    fn apply_exposes_agents_for_claude_and_codex() -> Result<()> {
         let temp = make_project()?;
         init_project(
             temp.path(),
@@ -2067,7 +2225,65 @@ mod tests {
         let package_root = example_package_root(temp.path());
         let agent_dir = package_root.join("agents").join("ply-reviewer");
         fs::create_dir_all(&agent_dir)?;
-        write(&agent_dir.join("AGENT.md"), "# ply-reviewer\n")?;
+        write(
+            &agent_dir.join("AGENT.md"),
+            "# ply-reviewer\n\nPly-managed agent for focused review.\n\nReview carefully.\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let codex_agent = fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("agents")
+                .join("ply-reviewer.toml"),
+        )?;
+        assert!(codex_agent.contains("name = \"ply-reviewer\""));
+        assert!(codex_agent.contains("description = \"Ply-managed agent for focused review.\""));
+        assert!(codex_agent.contains("developer_instructions = "));
+
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("agents")
+                .join("ply-reviewer")
+                .join("AGENT.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn agent_targets_can_limit_codex_generation() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        let agent_dir = package_root.join("agents").join("ply-claude-reviewer");
+        fs::create_dir_all(&agent_dir)?;
+        write(
+            &agent_dir.join("AGENT.md"),
+            "# ply-claude-reviewer\n\nClaude-only agent.\n",
+        )?;
+        write(
+            &agent_dir.join("ply-asset.toml"),
+            "targets = [\"claude\"]\n",
+        )?;
 
         apply(
             temp.path(),
@@ -2081,16 +2297,15 @@ mod tests {
             temp.path()
                 .join(".claude")
                 .join("agents")
-                .join("ply-reviewer")
+                .join("ply-claude-reviewer")
                 .join("AGENT.md")
                 .exists()
         );
         assert!(
             !temp.path()
-                .join(".agents")
+                .join(".codex")
                 .join("agents")
-                .join("ply-reviewer")
-                .join("AGENT.md")
+                .join("ply-claude-reviewer.toml")
                 .exists()
         );
         Ok(())
