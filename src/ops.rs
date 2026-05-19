@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -14,6 +13,11 @@ use crate::config::{
     load_ssh_config_if_present, load_state,
 };
 use crate::git;
+use crate::prompt_resources::{
+    is_prompt_resource, parse_prompt_resource, primary_markdown_name, prompt_logical_name,
+    render_claude_markdown, render_codex_agent, render_codex_prompt_preamble,
+    render_codex_skill_sidecar,
+};
 use crate::ui::{self, Tone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,13 +124,6 @@ struct CompositeSection {
 struct AssetMetadata {
     #[serde(default)]
     targets: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CodexAgentFile {
-    name: String,
-    description: String,
-    developer_instructions: String,
 }
 
 const PLY_MANAGED_START: &str = "<!-- ply:start -->";
@@ -960,9 +957,11 @@ fn build_plan(
                 }
                 let source_dir = package.root.join(kind.as_str());
                 if source_dir.exists() {
-                    if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
-                        collect_codex_agent_plans(
+                    if is_prompt_resource(kind) {
+                        collect_prompt_resource_plans(
                             project_root,
+                            adapter,
+                            kind,
                             &source_dir,
                             package.source_layer,
                             format!(
@@ -970,6 +969,7 @@ fn build_plan(
                                 package.manifest.name, package.source_id
                             ),
                             &mut plan,
+                            &mut sections,
                             &mut seen,
                         )?;
                         continue;
@@ -1028,13 +1028,16 @@ fn build_plan(
             continue;
         }
         if kind.is_directory_based() {
-            if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
-                collect_codex_agent_plans(
+            if is_prompt_resource(kind) {
+                collect_prompt_resource_plans(
                     project_root,
+                    adapter,
+                    kind,
                     &source_path,
                     overlay.layer,
                     format!("overlay {}", overlay.entry.path),
                     &mut plan,
+                    &mut sections,
                     &mut seen,
                 )?;
                 continue;
@@ -1061,14 +1064,28 @@ fn build_plan(
                 ExposureMode::InjectBlock => {}
             }
         } else {
-            collect_document_section(
-                adapter,
-                kind,
-                &source_path,
-                overlay.layer,
-                format!("overlay {}", overlay.entry.path),
-                &mut sections,
-            )?;
+            if is_prompt_resource(kind) {
+                collect_prompt_document_plan(
+                    project_root,
+                    adapter,
+                    kind,
+                    &source_path,
+                    overlay.layer,
+                    format!("overlay {}", overlay.entry.path),
+                    &mut plan,
+                    &mut sections,
+                    &mut seen,
+                )?;
+            } else {
+                collect_document_section(
+                    adapter,
+                    kind,
+                    &source_path,
+                    overlay.layer,
+                    format!("overlay {}", overlay.entry.path),
+                    &mut sections,
+                )?;
+            }
         }
     }
 
@@ -1167,6 +1184,433 @@ fn append_managed_file_plans(
     Ok(())
 }
 
+fn collect_prompt_resource_plans(
+    project_root: &Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    source_dir: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    sections: &mut Vec<CompositeSection>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+) -> Result<()> {
+    match kind {
+        AssetKind::Commands | AssetKind::OutputStyles => {
+            for entry in fs::read_dir(source_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() || is_asset_metadata_file(&entry.path()) {
+                    continue;
+                }
+                collect_prompt_document_plan(
+                    project_root,
+                    adapter,
+                    kind,
+                    &entry.path(),
+                    origin_layer,
+                    origin_detail.clone(),
+                    plan,
+                    sections,
+                    seen,
+                )?;
+            }
+            Ok(())
+        }
+        AssetKind::Skills | AssetKind::Agents => {
+            for entry in fs::read_dir(source_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                collect_prompt_directory_plan(
+                    project_root,
+                    adapter,
+                    kind,
+                    &entry.path(),
+                    origin_layer,
+                    origin_detail.clone(),
+                    plan,
+                    sections,
+                    seen,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Err(anyhow!(
+            "unsupported prompt resource kind `{}`",
+            kind.as_str()
+        )),
+    }
+}
+
+fn collect_prompt_document_plan(
+    project_root: &Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    source_file: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    sections: &mut Vec<CompositeSection>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+) -> Result<()> {
+    let metadata = load_document_metadata(source_file)?;
+    if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+        return Ok(());
+    }
+    let logical_name = prompt_logical_name(source_file)?;
+    if kind.requires_ply_prefix() && !logical_name.starts_with("ply-") {
+        return Err(anyhow!(
+            "managed asset `{}` must use the `ply-` prefix",
+            source_file.display()
+        ));
+    }
+    let markdown = fs::read_to_string(source_file)?;
+    let resource = parse_prompt_resource(kind, &logical_name, &markdown)?;
+
+    match (adapter, kind) {
+        (AdapterKind::Claude, AssetKind::Commands)
+        | (AdapterKind::Claude, AssetKind::OutputStyles) => {
+            let rendered = render_claude_markdown(kind, &resource)?;
+            let rel = source_file
+                .file_name()
+                .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
+            let rel = PathBuf::from(rel);
+            push_rendered_file(
+                project_root,
+                adapter,
+                kind,
+                logical_name,
+                rel,
+                rendered.into_bytes(),
+                origin_layer,
+                origin_detail,
+                plan,
+                seen,
+                ExposureMode::Direct,
+            )
+        }
+        (AdapterKind::Codex, AssetKind::Commands) => {
+            let rendered = render_codex_prompt_markdown(&resource);
+            let rel = source_file
+                .file_name()
+                .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
+            let rel = PathBuf::from(rel);
+            push_rendered_file(
+                project_root,
+                adapter,
+                kind,
+                logical_name,
+                rel,
+                rendered.into_bytes(),
+                origin_layer,
+                origin_detail,
+                plan,
+                seen,
+                ExposureMode::Direct,
+            )
+        }
+        (AdapterKind::Codex, AssetKind::OutputStyles) => {
+            let rendered = render_codex_prompt_markdown(&resource);
+            if rendered.trim().is_empty() {
+                return Ok(());
+            }
+            sections.push(CompositeSection {
+                adapter,
+                kind,
+                title: source_file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(kind.as_str())
+                    .to_string(),
+                content: rendered,
+                origin_layer,
+                origin_detail,
+            });
+            Ok(())
+        }
+        _ => Err(anyhow!(
+            "unexpected prompt document mapping for `{}` `{}`",
+            adapter.as_str(),
+            kind.as_str()
+        )),
+    }
+}
+
+fn collect_prompt_directory_plan(
+    project_root: &Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    resource_dir: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    _sections: &mut Vec<CompositeSection>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+) -> Result<()> {
+    let logical_name = resource_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", resource_dir.display()))?
+        .to_string();
+    if kind.requires_ply_prefix() && !logical_name.starts_with("ply-") {
+        return Err(anyhow!(
+            "managed asset `{}` must use the `ply-` prefix",
+            logical_name
+        ));
+    }
+    let parent = resource_dir
+        .parent()
+        .ok_or_else(|| anyhow!("resource directory `{}` has no parent", resource_dir.display()))?;
+    let metadata = load_resource_metadata(parent, &logical_name)?;
+    if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+        return Ok(());
+    }
+    let primary_name = primary_markdown_name(kind)
+        .ok_or_else(|| anyhow!("no primary markdown file for `{}`", kind.as_str()))?;
+    let primary_path = resource_dir.join(primary_name);
+    if !primary_path.exists() {
+        return Err(anyhow!(
+            "{} `{}` is missing {}",
+            kind.as_str(),
+            resource_dir.strip_prefix(parent).unwrap_or(resource_dir).display(),
+            primary_name
+        ));
+    }
+    if kind == AssetKind::Skills && resource_dir.join("agents").join("openai.yaml").exists() {
+        return Err(anyhow!(
+            "skill `{}` must not author `agents/openai.yaml` directly; use Codex frontmatter metadata instead",
+            logical_name
+        ));
+    }
+
+    let markdown = fs::read_to_string(&primary_path)?;
+    let resource = parse_prompt_resource(kind, &logical_name, &markdown)?;
+
+    match (adapter, kind) {
+        (AdapterKind::Claude, AssetKind::Skills) | (AdapterKind::Claude, AssetKind::Agents) => {
+            let rendered = render_claude_markdown(kind, &resource)?;
+            push_rendered_file(
+                project_root,
+                adapter,
+                kind,
+                logical_name.clone(),
+                PathBuf::from(&logical_name).join(primary_name),
+                rendered.into_bytes(),
+                origin_layer,
+                origin_detail.clone(),
+                plan,
+                seen,
+                ExposureMode::Direct,
+            )?;
+            copy_prompt_directory_companions(
+                project_root,
+                adapter,
+                kind,
+                resource_dir,
+                &logical_name,
+                &primary_path,
+                origin_layer,
+                origin_detail,
+                plan,
+                seen,
+            )
+        }
+        (AdapterKind::Codex, AssetKind::Skills) => {
+            let rendered = render_codex_prompt_markdown(&resource);
+            push_rendered_file(
+                project_root,
+                adapter,
+                kind,
+                logical_name.clone(),
+                PathBuf::from(&logical_name).join(primary_name),
+                rendered.into_bytes(),
+                origin_layer,
+                origin_detail.clone(),
+                plan,
+                seen,
+                ExposureMode::Direct,
+            )?;
+            copy_prompt_directory_companions(
+                project_root,
+                adapter,
+                kind,
+                resource_dir,
+                &logical_name,
+                &primary_path,
+                origin_layer,
+                origin_detail.clone(),
+                plan,
+                seen,
+            )?;
+            if let Some(sidecar) = render_codex_skill_sidecar(&resource)? {
+                push_rendered_file(
+                    project_root,
+                    adapter,
+                    kind,
+                    logical_name,
+                    PathBuf::from(resource.logical_name.as_str())
+                        .join("agents")
+                        .join("openai.yaml"),
+                    sidecar.into_bytes(),
+                    origin_layer,
+                    origin_detail,
+                    plan,
+                    seen,
+                    ExposureMode::Direct,
+                )?;
+            }
+            Ok(())
+        }
+        (AdapterKind::Codex, AssetKind::Agents) => {
+            let rendered = render_codex_agent(&resource)?;
+            let generated_relative_path = PathBuf::from(".ply")
+                .join("generated")
+                .join("codex")
+                .join("agents")
+                .join(format!("{logical_name}.toml"));
+            let exposed_relative_path = PathBuf::from(".codex")
+                .join("agents")
+                .join(format!("{logical_name}.toml"));
+            if let Some(index) = seen.get(&generated_relative_path).copied() {
+                plan[index] = PlannedFile {
+                    adapter: AdapterKind::Codex,
+                    kind: AssetKind::Agents,
+                    exposure_mode: ExposureMode::GeneratedComposite,
+                    relative_name: logical_name,
+                    generated_relative_path,
+                    exposed_relative_path,
+                    contents: rendered.into_bytes(),
+                    origin_layer,
+                    origin_detail,
+                };
+            } else {
+                let index = plan.len();
+                seen.insert(generated_relative_path.clone(), index);
+                plan.push(PlannedFile {
+                    adapter: AdapterKind::Codex,
+                    kind: AssetKind::Agents,
+                    exposure_mode: ExposureMode::GeneratedComposite,
+                    relative_name: logical_name,
+                    generated_relative_path,
+                    exposed_relative_path,
+                    contents: rendered.into_bytes(),
+                    origin_layer,
+                    origin_detail,
+                });
+            }
+            Ok(())
+        }
+        _ => Err(anyhow!(
+            "unexpected prompt directory mapping for `{}` `{}`",
+            adapter.as_str(),
+            kind.as_str()
+        )),
+    }
+}
+
+fn copy_prompt_directory_companions(
+    project_root: &Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    resource_dir: &Path,
+    logical_name: &str,
+    primary_path: &Path,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+) -> Result<()> {
+    let files = collect_file_paths(resource_dir)?;
+    for file in files {
+        if file == primary_path || is_asset_metadata_file(&file) {
+            continue;
+        }
+        let rel = file.strip_prefix(resource_dir)?;
+        if kind == AssetKind::Skills && rel == Path::new("agents").join("openai.yaml").as_path() {
+            continue;
+        }
+        push_rendered_file(
+            project_root,
+            adapter,
+            kind,
+            logical_name.to_string(),
+            PathBuf::from(logical_name).join(rel),
+            fs::read(&file)?,
+            origin_layer,
+            origin_detail.clone(),
+            plan,
+            seen,
+            ExposureMode::Direct,
+        )?;
+    }
+    Ok(())
+}
+
+fn push_rendered_file(
+    project_root: &Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    relative_name: String,
+    relative_path_within_kind: PathBuf,
+    contents: Vec<u8>,
+    origin_layer: LayerKind,
+    origin_detail: String,
+    plan: &mut Vec<PlannedFile>,
+    seen: &mut BTreeMap<PathBuf, usize>,
+    exposure_mode: ExposureMode,
+) -> Result<()> {
+    let generated_relative_path = PathBuf::from(".ply")
+        .join("generated")
+        .join(adapter.as_str())
+        .join(kind.as_str())
+        .join(&relative_path_within_kind);
+    let exposed_root = adapter
+        .direct_asset_root(project_root, kind)
+        .ok_or_else(|| anyhow!("no direct root for `{}` `{}`", adapter.as_str(), kind.as_str()))?;
+    let exposed_relative_path = exposed_root
+        .strip_prefix(project_root)?
+        .join(&relative_path_within_kind);
+
+    if let Some(index) = seen.get(&generated_relative_path).copied() {
+        plan[index] = PlannedFile {
+            adapter,
+            kind,
+            exposure_mode,
+            relative_name,
+            generated_relative_path,
+            exposed_relative_path,
+            contents,
+            origin_layer,
+            origin_detail,
+        };
+    } else {
+        let index = plan.len();
+        seen.insert(generated_relative_path.clone(), index);
+        plan.push(PlannedFile {
+            adapter,
+            kind,
+            exposure_mode,
+            relative_name,
+            generated_relative_path,
+            exposed_relative_path,
+            contents,
+            origin_layer,
+            origin_detail,
+        });
+    }
+    Ok(())
+}
+
+fn render_codex_prompt_markdown(resource: &crate::prompt_resources::ParsedPromptResource) -> String {
+    match render_codex_prompt_preamble(resource) {
+        Some(preamble) if !resource.body.is_empty() => format!("{preamble}{}\n", resource.body),
+        Some(preamble) => preamble,
+        None if resource.body.is_empty() => String::new(),
+        None => format!("{}\n", resource.body),
+    }
+}
+
 fn collect_planned_files(
     project_root: &Path,
     adapter: AdapterKind,
@@ -1244,124 +1688,6 @@ fn collect_planned_files(
         }
     }
     Ok(())
-}
-
-fn collect_codex_agent_plans(
-    project_root: &Path,
-    source_dir: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    seen: &mut BTreeMap<PathBuf, usize>,
-) -> Result<()> {
-    let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
-    for entry in fs::read_dir(source_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let top_level_name = entry.file_name().to_string_lossy().to_string();
-        let metadata = metadata_cache
-            .entry(top_level_name.clone())
-            .or_insert_with(|| load_resource_metadata(source_dir, &top_level_name))
-            .as_ref()
-            .map_err(|err| anyhow!(err.to_string()))?;
-        if !resource_targets_adapter(metadata.as_ref(), AdapterKind::Codex)? {
-            continue;
-        }
-        if !top_level_name.starts_with("ply-") {
-            return Err(anyhow!(
-                "managed asset `{}` must use the `ply-` prefix",
-                top_level_name
-            ));
-        }
-
-        let agent_instructions = entry.path().join("AGENT.md");
-        if !agent_instructions.exists() {
-            return Err(anyhow!(
-                "agent `{}` is missing AGENT.md",
-                entry.path().strip_prefix(source_dir).unwrap_or(&entry.path()).display()
-            ));
-        }
-
-        let markdown = fs::read_to_string(&agent_instructions)?;
-        let rendered = render_codex_agent_file(&top_level_name, &markdown)?;
-        let generated_relative_path = PathBuf::from(".ply")
-            .join("generated")
-            .join("codex")
-            .join("agents")
-            .join(format!("{top_level_name}.toml"));
-        let exposed_relative_path = PathBuf::from(".codex")
-            .join("agents")
-            .join(format!("{top_level_name}.toml"));
-
-        if let Some(index) = seen.get(&generated_relative_path).copied() {
-            plan[index] = PlannedFile {
-                adapter: AdapterKind::Codex,
-                kind: AssetKind::Agents,
-                exposure_mode: ExposureMode::GeneratedComposite,
-                relative_name: top_level_name,
-                generated_relative_path,
-                exposed_relative_path,
-                contents: rendered.into_bytes(),
-                origin_layer,
-                origin_detail: origin_detail.clone(),
-            };
-        } else {
-            let index = plan.len();
-            seen.insert(generated_relative_path.clone(), index);
-            plan.push(PlannedFile {
-                adapter: AdapterKind::Codex,
-                kind: AssetKind::Agents,
-                exposure_mode: ExposureMode::GeneratedComposite,
-                relative_name: top_level_name,
-                generated_relative_path,
-                exposed_relative_path,
-                contents: rendered.into_bytes(),
-                origin_layer,
-                origin_detail: origin_detail.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn render_codex_agent_file(resource_name: &str, markdown: &str) -> Result<String> {
-    let agent = CodexAgentFile {
-        name: resource_name.to_string(),
-        description: infer_agent_description(resource_name, markdown),
-        developer_instructions: markdown.trim().to_string(),
-    };
-    toml::to_string_pretty(&agent).map_err(Into::into)
-}
-
-fn infer_agent_description(resource_name: &str, markdown: &str) -> String {
-    let mut lines = markdown.lines().peekable();
-    while let Some(line) = lines.peek() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            lines.next();
-            continue;
-        }
-        let mut description = String::new();
-        while let Some(line) = lines.peek() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                break;
-            }
-            if !description.is_empty() {
-                description.push(' ');
-            }
-            description.push_str(trimmed);
-            lines.next();
-        }
-        if !description.is_empty() {
-            return description;
-        }
-    }
-
-    format!("Ply-managed agent `{resource_name}`.")
 }
 
 fn collect_document_section(
@@ -2616,6 +2942,222 @@ mod tests {
         assert!(local_file.contains("Personal note."));
         assert!(local_file.contains(PLY_MANAGED_START));
         assert!(local_file.contains("Work through diffs carefully."));
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_frontmatter_renders_adapter_specific_outputs() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+
+        write(
+            &package_root.join("commands").join("ply-docs.md"),
+            r#"---
+name: docs-helper
+description: Help with project documentation
+argument-hint: [topic]
+claude:
+  tools:
+    - Read
+    - Write
+codex:
+  model: gpt-5.5
+  tools: shell, patch
+  reasoning_effort: high
+---
+
+Write concise documentation for $ARGUMENTS.
+"#,
+        )?;
+
+        let skill_root = package_root.join("skills").join("ply-writer");
+        fs::create_dir_all(skill_root.join("scripts"))?;
+        write(
+            &skill_root.join("SKILL.md"),
+            r#"---
+name: writer
+description: Writing workflow
+claude:
+  tools: Read, Write
+codex:
+  model: gpt-5.5
+  reasoning_effort: medium
+  interface:
+    display_name: Writer
+  policy:
+    invocation: manual
+  dependencies:
+    references:
+      - style-guide
+---
+
+Write clearly and cite facts.
+"#,
+        )?;
+        write(
+            &skill_root.join("scripts").join("helper.sh"),
+            "#!/usr/bin/env bash\necho helper\n",
+        )?;
+
+        let agent_root = package_root.join("agents").join("ply-reviewer");
+        fs::create_dir_all(&agent_root)?;
+        write(
+            &agent_root.join("AGENT.md"),
+            r#"---
+name: reviewer
+description: Reviews code carefully
+claude:
+  model: sonnet
+  tools: Read, Bash
+codex:
+  model: gpt-5.5
+  reasoning_effort: high
+  sandbox_mode: workspace-write
+  approval_policy: on-request
+---
+
+Review carefully and surface findings first.
+"#,
+        )?;
+
+        write(
+            &package_root
+                .join("output-styles")
+                .join("ply-concise.md"),
+            r#"---
+name: Concise
+description: Keep responses tight
+keep-coding-instructions: true
+codex:
+  model: gpt-5.5
+  reasoning_effort: low
+---
+
+Use short, direct responses.
+"#,
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let claude_command =
+            fs::read_to_string(temp.path().join(".claude").join("commands").join("ply-docs.md"))?;
+        assert!(claude_command.contains("allowed-tools:"));
+        assert!(claude_command.contains("argument-hint:"));
+        assert!(claude_command.contains("topic"));
+
+        let codex_command =
+            fs::read_to_string(temp.path().join(".agents").join("commands").join("ply-docs.md"))?;
+        assert!(codex_command.contains("## Ply Codex Settings"));
+        assert!(codex_command.contains("Preferred model: gpt-5.5"));
+        assert!(codex_command.contains("Write concise documentation"));
+
+        let claude_skill = fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-writer")
+                .join("SKILL.md"),
+        )?;
+        assert!(claude_skill.contains("allowed-tools:"));
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-writer")
+                .join("scripts")
+                .join("helper.sh")
+                .exists()
+        );
+        let codex_skill_sidecar = fs::read_to_string(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-writer")
+                .join("agents")
+                .join("openai.yaml"),
+        )?;
+        assert!(codex_skill_sidecar.contains("interface:"));
+        assert!(codex_skill_sidecar.contains("policy:"));
+        assert!(codex_skill_sidecar.contains("dependencies:"));
+
+        let claude_agent = fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("agents")
+                .join("ply-reviewer")
+                .join("AGENT.md"),
+        )?;
+        assert!(claude_agent.contains("model: sonnet"));
+        assert!(claude_agent.contains("tools:"));
+        let codex_agent =
+            fs::read_to_string(temp.path().join(".codex").join("agents").join("ply-reviewer.toml"))?;
+        assert!(codex_agent.contains("model = \"gpt-5.5\""));
+        assert!(codex_agent.contains("model_reasoning_effort = \"high\""));
+        assert!(codex_agent.contains("sandbox_mode = \"workspace-write\""));
+        assert!(codex_agent.contains("approval_policy = \"on-request\""));
+
+        let claude_style = fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("output-styles")
+                .join("ply-concise.md"),
+        )?;
+        assert!(claude_style.contains("keep-coding-instructions: true"));
+        let codex_override = fs::read_to_string(temp.path().join("AGENTS.override.md"))?;
+        assert!(codex_override.contains("## Ply Codex Settings"));
+        assert!(codex_override.contains("Use short, direct responses."));
+        Ok(())
+    }
+
+    #[test]
+    fn reject_raw_codex_skill_sidecar_in_package() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = example_package_root(temp.path());
+        let skill_root = package_root.join("skills").join("ply-bad-sidecar");
+        fs::create_dir_all(skill_root.join("agents"))?;
+        write(&skill_root.join("SKILL.md"), "# ply-bad-sidecar\n")?;
+        write(
+            &skill_root.join("agents").join("openai.yaml"),
+            "interface:\n  display_name: Bad\n",
+        )?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must not author `agents/openai.yaml` directly"));
         Ok(())
     }
 

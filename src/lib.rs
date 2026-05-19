@@ -2,6 +2,7 @@ mod adapters;
 mod config;
 mod git;
 mod ops;
+mod prompt_resources;
 mod ui;
 
 use anyhow::{Result, anyhow};
