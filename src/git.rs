@@ -55,8 +55,36 @@ CLAUDE.local.md
     }
     block.push_str("# ply:end\n");
     let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    if existing.contains(PLY_EXCLUDE_START) {
-        return Ok(());
+    if let Some(start) = existing.find(PLY_EXCLUDE_START) {
+        let Some(end_marker) = existing[start..].find(PLY_EXCLUDE_END) else {
+            return Err(anyhow!(
+                "found `{PLY_EXCLUDE_START}` in {} without matching `{PLY_EXCLUDE_END}`",
+                exclude_path.display()
+            ));
+        };
+        let mut end = start + end_marker + PLY_EXCLUDE_END.len();
+        if existing[end..].starts_with('\n') {
+            end += 1;
+        }
+
+        let mut content = String::new();
+        content.push_str(&existing[..start]);
+        if !content.ends_with('\n') && !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(&block);
+        let suffix = existing[end..].trim_start_matches('\n');
+        if !suffix.is_empty() {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(suffix);
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+        }
+        return fs::write(&exclude_path, content)
+            .with_context(|| format!("failed to update {}", exclude_path.display()));
     }
     let mut content = existing;
     if !content.ends_with('\n') && !content.is_empty() {
@@ -294,6 +322,31 @@ fn expand_tilde(value: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn ensure_local_excludes_refreshes_existing_block() -> Result<()> {
+        let temp = TempDir::new()?;
+        run_git(temp.path(), ["init"])?;
+        let exclude_path = temp.path().join(".git").join("info").join("exclude");
+        fs::write(
+            &exclude_path,
+            "# ply:start\n.ply/generated/\n# ply:end\ncustom-entry\n",
+        )?;
+
+        ensure_local_excludes(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: false,
+                ignore_config: false,
+            },
+        )?;
+
+        let content = fs::read_to_string(&exclude_path)?;
+        assert!(content.contains("ply.local.toml"));
+        assert!(content.contains("ply.ssh.toml"));
+        assert!(content.contains("custom-entry"));
+        Ok(())
+    }
 
     #[test]
     fn resolve_github_shorthand() -> Result<()> {
