@@ -40,7 +40,11 @@ The current MVP supports:
 Implemented behavior:
 
 - local path sources
-- Git sources pinned in `ply.lock`
+- Git sources with:
+  - `repo` as local path, GitHub shorthand, or full remote
+  - local semantic overrides through `ply.local.toml`
+  - local SSH transport config through `ply.ssh.toml`
+  - pinned revisions in `ply.lock`
 - deterministic generation under `.ply/generated/`
 - Claude and Codex asset mapping for:
   - `commands`
@@ -95,14 +99,54 @@ adapters = ["codex", "claude"]
 mode = "copy"
 
 [[sources]]
-id = "local"
-kind = "path"
-path = "./ply-packages"
+id = "team"
+kind = "git"
+repo = "owner/ply-team"
+rev = "main"
 
 [[packages]]
-source = "local"
-path = "example-review"
+source = "team"
+path = "."
 ```
+
+Git source `repo` accepts:
+
+- local path: `../ply-team`
+- GitHub shorthand: `owner/ply-team`
+- full remote: `https://...`, `ssh://...`, or `git@...`
+
+## Local config layers
+
+Shared project intent lives in `ply.toml`.
+
+`ply.local.toml` is optional and local-only. Use it to override or add
+sources and packages on one machine without changing the shared project
+manifest.
+
+Example:
+
+```toml
+[[sources]]
+id = "team"
+kind = "git"
+repo = "../ply-team"
+rev = "HEAD"
+```
+
+`ply.ssh.toml` is also optional and local-only. Use it for source-specific
+SSH transport preferences and keys.
+
+Example:
+
+```toml
+[sources.team]
+use_ssh = true
+ssh_key_path = "~/.ssh/id_ply_team"
+```
+
+With that combination, a shared shorthand source such as
+`repo = "owner/ply-team"` can be used over GitHub SSH locally without
+modifying `ply.toml`.
 
 ## Package layout
 
@@ -190,6 +234,8 @@ Ply-managed paths that typically need ignore coverage include:
 - `.ply/generated/`
 - `.ply/state.json`
 - `.ply/local.yml`
+- `ply.local.toml`
+- `ply.ssh.toml`
 - `AGENTS.override.md`
 - `CLAUDE.local.md`
 - any Ply-managed `.claude/*`, `.codex/*`, or `.agents/*` assets
