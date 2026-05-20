@@ -549,10 +549,10 @@ Usage:
 
 Commands:
   init       initialize Ply in the project, global root, or a package root
-  apply      resolve packages, preview or write managed assets
+  apply      resolve sources, preview or write managed assets
   diff       show managed content drift with layer origin context
-  doctor     validate manifest, sources, package layout, and git safety
-  list       show resolved packages
+  doctor     validate manifest, sources, package roots, and git safety
+  list       show resolved package roots
   sources    show configured sources and pinned revisions
   adapters   show supported adapters
   clean      remove Ply-managed files from the project or global root

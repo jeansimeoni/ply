@@ -89,10 +89,11 @@ Ply manages two related but different workflows:
 
 - consuming shared agent resources in a project repo through `ply init` and
   `ply apply`
-- authoring reusable package content through `ply init package`
+- authoring one reusable package root through `ply init package`
 
 `ply init package` is intended for any directory that will become a package
-root, including a standalone folder or a dedicated Git repository.
+root, including a standalone folder or a dedicated Git repository. Each
+configured source points directly at one package root.
 
 ## Project manifest
 
@@ -110,11 +111,10 @@ id = "team"
 kind = "git"
 repo = "owner/ply-team"
 rev = "main"
-
-[[packages]]
-source = "team"
-path = "."
 ```
+
+Each configured source is treated as one package root. Ply expects
+`ply-package.toml` at that source root.
 
 Git source `repo` accepts:
 
