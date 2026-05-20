@@ -269,7 +269,7 @@ fn clone_or_refresh_remote(
     }
 
     let rev = source.rev.as_deref().unwrap_or("HEAD");
-    let resolved = run_git(repo_path, ["rev-parse", rev])?;
+    let resolved = resolve_checkout_revision(repo_path, rev, ssh_command.as_deref())?;
     let mut checkout = Command::new("git");
     checkout
         .args(["checkout", "--force", resolved.trim()])
@@ -287,6 +287,16 @@ fn clone_or_refresh_remote(
     }
 
     Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
+}
+
+fn resolve_checkout_revision(repo_path: &Path, rev: &str, ssh_command: Option<&str>) -> Result<String> {
+    if rev != "HEAD" {
+        let remote_ref = format!("refs/remotes/origin/{rev}");
+        if let Ok(resolved) = run_git_with_env(repo_path, ["rev-parse", "--verify", &remote_ref], ssh_command) {
+            return Ok(resolved);
+        }
+    }
+    run_git_with_env(repo_path, ["rev-parse", rev], ssh_command)
 }
 
 fn ssh_command(ssh_config: Option<&SshSourceConfig>) -> Result<Option<String>> {
@@ -324,6 +334,13 @@ fn expand_tilde(value: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn commit_file(repo: &Path, name: &str, content: &str) -> Result<String> {
+        fs::write(repo.join(name), content)?;
+        run_git(repo, ["add", name])?;
+        let _ = run_git(repo, ["commit", "-m", "update fixture"])?;
+        run_git(repo, ["rev-parse", "HEAD"])
+    }
 
     #[test]
     fn ensure_local_excludes_refreshes_existing_block() -> Result<()> {
@@ -383,6 +400,39 @@ mod tests {
         assert!(command.unwrap().contains("IdentitiesOnly=yes"));
         Ok(())
     }
+
+    #[test]
+    fn clone_or_update_source_refreshes_branch_tip() -> Result<()> {
+        let temp = TempDir::new()?;
+        let remote = temp.path().join("remote.git");
+        run_git(temp.path(), ["init", "--bare", remote.to_str().unwrap()])?;
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&worktree)?;
+        run_git(&worktree, ["init", "-b", "master"])?;
+        run_git(&worktree, ["config", "user.email", "test@example.com"])?;
+        run_git(&worktree, ["config", "user.name", "Test User"])?;
+        run_git(&worktree, ["remote", "add", "origin", remote.to_str().unwrap()])?;
+        let first = commit_file(&worktree, "ply-package.toml", "name = \"fixture\"\n")?;
+        run_git(&worktree, ["push", "origin", "master"])?;
+
+        let source = SourceConfig {
+            id: "fixture".to_string(),
+            kind: "git".to_string(),
+            path: None,
+            repo: Some(format!("file://{}", remote.display())),
+            url: None,
+            rev: Some("master".to_string()),
+        };
+
+        let (_, resolved_first) = clone_or_update_source(temp.path(), &source, None)?;
+        assert_eq!(resolved_first, first);
+
+        let second = commit_file(&worktree, "README.md", "# updated\n")?;
+        run_git(&worktree, ["push", "origin", "master"])?;
+        let (_, resolved_second) = clone_or_update_source(temp.path(), &source, None)?;
+        assert_eq!(resolved_second, second);
+        Ok(())
+    }
 }
 
 pub fn run_git<I, S>(project_root: &Path, args: I) -> Result<String>
@@ -390,11 +440,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .context("failed to run git command")?;
+    run_git_with_env(project_root, args, None)
+}
+
+fn run_git_with_env<I, S>(project_root: &Path, args: I, ssh_command: Option<&str>) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let output = command.output().context("failed to run git command")?;
     if !output.status.success() {
         return Err(anyhow!(
             "git command failed: {}",

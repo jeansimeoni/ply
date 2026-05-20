@@ -16,8 +16,6 @@ pub struct Manifest {
     pub adapters: Vec<String>,
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
-    #[serde(default)]
-    pub packages: Vec<PackageSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,8 +45,6 @@ pub struct LocalManifest {
     #[serde(default)]
     pub sources: Vec<LocalSourceConfig>,
     #[serde(default)]
-    pub packages: Vec<PackageSelection>,
-    #[serde(default)]
     pub overlays: Vec<OverlayEntry>,
 }
 
@@ -65,12 +61,6 @@ pub struct LocalSourceConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub rev: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageSelection {
-    pub source: String,
-    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -318,11 +308,7 @@ use_global = true
 [[sources]]
 id = "local"
 kind = "path"
-path = "./ply-packages"
-
-[[packages]]
-source = "local"
-path = "example-review"
+path = "./ply-packages/example-review"
 "#
     } else {
         r#"schema_version = 1
@@ -438,31 +424,6 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     for adapter in &manifest.adapters {
         if !supported_adapters.contains(&adapter.as_str()) {
             return Err(anyhow!("unsupported adapter `{adapter}`"));
-        }
-    }
-
-    for package in &manifest.packages {
-        if !source_ids.contains(&package.source) {
-            return Err(anyhow!(
-                "package `{}` references unknown source `{}`",
-                package.path,
-                package.source
-            ));
-        }
-        if package.path.trim().is_empty() {
-            return Err(anyhow!("package path cannot be empty"));
-        }
-    }
-
-    let mut unique_packages = BTreeSet::new();
-    for package in &manifest.packages {
-        let key = format!("{}::{}", package.source, package.path);
-        if !unique_packages.insert(key) {
-            return Err(anyhow!(
-                "duplicate package selection `{}` from source `{}`",
-                package.path,
-                package.source
-            ));
         }
     }
 
@@ -594,7 +555,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn reject_duplicate_package_selection() {
+    fn accept_manifest_with_single_source_package_root() -> Result<()> {
         let manifest = Manifest {
             schema_version: 1,
             install: InstallConfig::default(),
@@ -602,25 +563,15 @@ mod tests {
             sources: vec![SourceConfig {
                 id: "local".to_string(),
                 kind: "path".to_string(),
-                path: Some("./packages".to_string()),
+                path: Some("./packages/example".to_string()),
                 repo: None,
                 url: None,
                 rev: None,
             }],
-            packages: vec![
-                PackageSelection {
-                    source: "local".to_string(),
-                    path: "example".to_string(),
-                },
-                PackageSelection {
-                    source: "local".to_string(),
-                    path: "example".to_string(),
-                },
-            ],
         };
 
-        let err = validate_manifest(&manifest).unwrap_err();
-        assert!(err.to_string().contains("duplicate package selection"));
+        validate_manifest(&manifest)?;
+        Ok(())
     }
 
     #[test]
@@ -642,7 +593,6 @@ mod tests {
         let manifest = LocalManifest {
             schema_version: 1,
             sources: Vec::new(),
-            packages: Vec::new(),
             overlays: vec![OverlayEntry {
                 adapter: "claude".to_string(),
                 kind: "skills".to_string(),
@@ -720,7 +670,6 @@ path = ".ply/overlays/codex/skills"
                 url: Some("https://example.com/repo.git".to_string()),
                 rev: None,
             }],
-            packages: Vec::new(),
         };
 
         let err = validate_manifest(&manifest).unwrap_err();

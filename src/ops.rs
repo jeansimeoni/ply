@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
 use crate::config::{
     self, InitOptions, LocalManifest, LocalOverlayConfig, LocalSourceConfig, LockedSource,
-    Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, PackageSelection,
-    SourceConfig, SshConfigFile, SshSourceConfig, State, load_local_manifest_if_present,
-    load_local_overlays, load_manifest, load_manifest_if_present, load_package_manifest,
-    load_ssh_config_if_present, load_state,
+    Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, SourceConfig, SshConfigFile,
+    SshSourceConfig, State, load_local_manifest_if_present, load_local_overlays, load_manifest,
+    load_manifest_if_present, load_package_manifest, load_ssh_config_if_present, load_state,
 };
 use crate::git;
 use crate::prompt_resources::{
@@ -53,11 +52,6 @@ struct MergedSource {
 }
 
 #[derive(Debug, Clone)]
-struct MergedPackage {
-    selection: PackageSelection,
-}
-
-#[derive(Debug, Clone)]
 struct MergedOverlay {
     entry: OverlayEntry,
     root: PathBuf,
@@ -68,7 +62,6 @@ struct MergedOverlay {
 struct ComposedConfig {
     adapters: Vec<String>,
     sources: Vec<MergedSource>,
-    packages: Vec<MergedPackage>,
     overlays: Vec<MergedOverlay>,
 }
 
@@ -683,7 +676,7 @@ pub fn list_packages(project_root: &Path, target: CommandTarget) -> Result<Strin
     let mut lines = Vec::new();
     for package in packages {
         lines.push(ui::list_item(&format!(
-            "{} ({}) from {} [{}]",
+            "{} ({}) from source {} [{}]",
             package.manifest.name,
             package
                 .manifest
@@ -792,7 +785,6 @@ fn compose_layers(layers: Vec<LayerConfig>) -> Result<ComposedConfig> {
     let mut seen_adapters = BTreeSet::new();
     let mut source_index = BTreeMap::new();
     let mut sources = Vec::new();
-    let mut packages = Vec::new();
     let mut overlays = Vec::new();
 
     for layer in layers {
@@ -820,12 +812,6 @@ fn compose_layers(layers: Vec<LayerConfig>) -> Result<ComposedConfig> {
             }
         }
 
-        for package in &layer.manifest.packages {
-            packages.push(MergedPackage {
-                selection: package.clone(),
-            });
-        }
-
         for overlay in &layer.overlays.overlays {
             overlays.push(MergedOverlay {
                 entry: overlay.clone(),
@@ -838,7 +824,6 @@ fn compose_layers(layers: Vec<LayerConfig>) -> Result<ComposedConfig> {
     Ok(ComposedConfig {
         adapters,
         sources,
-        packages,
         overlays,
     })
 }
@@ -847,7 +832,6 @@ fn resolve_composed(
     config: &ComposedConfig,
 ) -> Result<(Vec<ResolvedSource>, Vec<ResolvedPackage>)> {
     let mut sources = Vec::new();
-    let mut source_by_id = BTreeMap::new();
     for source in &config.sources {
         let resolved = match source.config.kind.as_str() {
             "path" => {
@@ -885,47 +869,25 @@ fn resolve_composed(
             }
             other => return Err(anyhow!("unsupported source kind `{other}`")),
         };
-        source_by_id.insert(resolved.id.clone(), resolved.clone());
         sources.push(resolved);
     }
 
     let mut packages = Vec::new();
-    for selection in &config.packages {
-        let source = source_by_id
-            .get(&selection.selection.source)
-            .ok_or_else(|| anyhow!("unknown source `{}`", selection.selection.source))?;
-        let package_root = source.root.join(&selection.selection.path);
-        if !package_root.exists() {
-            return Err(anyhow!(
-                "package path `{}` does not exist in source `{}`",
-                selection.selection.path,
-                selection.selection.source
-            ));
-        }
+    for source in &sources {
+        let package_root = source.root.clone();
         if !package_root.join("ply-package.toml").exists() {
             return Err(anyhow!(
-                "package `{}` in source `{}` is missing ply-package.toml",
-                selection.selection.path,
-                selection.selection.source
+                "source `{}` is missing ply-package.toml at its root",
+                source.id
             ));
         }
         let manifest = load_package_manifest(&package_root)?;
         packages.push(ResolvedPackage {
-            source_id: selection.selection.source.clone(),
+            source_id: source.id.clone(),
             source_layer: source.layer,
             root: package_root,
             manifest,
         });
-    }
-
-    let mut package_names = BTreeSet::new();
-    for package in &packages {
-        if !package_names.insert(package.manifest.name.clone()) {
-            return Err(anyhow!(
-                "duplicate package name `{}` across resolved sources",
-                package.manifest.name
-            ));
-        }
     }
 
     Ok((sources, packages))
@@ -2330,8 +2292,6 @@ fn merge_local_manifest(
             manifest.sources.push(materialize_local_source(local_source)?);
         }
     }
-
-    manifest.packages.extend(local_manifest.packages);
     Ok(manifest)
 }
 
@@ -2420,7 +2380,6 @@ mod tests {
                 url: None,
                 rev: Some("main".to_string()),
             }],
-            packages: Vec::new(),
         };
         let local = LocalManifest {
             schema_version: 1,
@@ -2432,7 +2391,6 @@ mod tests {
                 url: None,
                 rev: Some("feature".to_string()),
             }],
-            packages: Vec::new(),
             overlays: Vec::new(),
         };
 
@@ -2528,6 +2486,49 @@ mod tests {
                 .join(".claude")
                 .join("skills")
                 .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_uses_source_root_without_package_selection() -> Result<()> {
+        let temp = make_project()?;
+        let package_root = temp.path().join("fixture-package");
+        fs::create_dir_all(package_root.join("skills").join("ply-check"))?;
+        write(
+            &package_root.join("ply-package.toml"),
+            "name = \"fixture-package\"\n",
+        )?;
+        write(
+            &package_root.join("skills").join("ply-check").join("SKILL.md"),
+            "# ply-check\n",
+        )?;
+        let manifest = format!(
+            "schema_version = 1\nadapters = [\"codex\", \"claude\"]\n\n[install]\nmode = \"copy\"\nuse_global = false\n\n[[sources]]\nid = \"fixture\"\nkind = \"path\"\npath = \"{}\"\n",
+            package_root.display()
+        );
+        write(&temp.path().join("ply.toml"), &manifest)?;
+        write(&temp.path().join("ply.local.toml"), "schema_version = 1\n")?;
+        write(
+            &temp.path().join(".ply").join("state.json"),
+            "{\n  \"schema_version\": 1,\n  \"install_mode\": \"copy\",\n  \"ignore_config\": false,\n  \"owned_paths\": []\n}\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        assert!(
+            temp.path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-check")
                 .join("SKILL.md")
                 .exists()
         );
