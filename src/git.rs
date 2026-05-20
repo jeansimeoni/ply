@@ -368,6 +368,27 @@ mod tests {
     }
 
     #[test]
+    fn ensure_local_excludes_adds_config_files_when_ignored() -> Result<()> {
+        let temp = TempDir::new()?;
+        run_git(temp.path(), ["init"])?;
+
+        ensure_local_excludes(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: false,
+                ignore_config: true,
+            },
+        )?;
+
+        let exclude_path = temp.path().join(".git").join("info").join("exclude");
+        let content = fs::read_to_string(&exclude_path)?;
+        assert!(content.contains("ply.toml"));
+        assert!(content.contains("ply.lock"));
+        assert!(content.contains("ply-packages/"));
+        Ok(())
+    }
+
+    #[test]
     fn resolve_github_shorthand() -> Result<()> {
         let temp = TempDir::new()?;
         match resolve_repo_spec(temp.path(), "owner/repo")? {

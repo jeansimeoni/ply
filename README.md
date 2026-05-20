@@ -80,7 +80,7 @@ Ply is designed to coexist with repository-owned agent context.
 - Ply prefers additive, local-only behavior over destructive replacement
 - Ply uses `.git/info/exclude` for clone-local ignore rules by default instead
   of modifying `.gitignore`
-- managed assets should use the `ply-` prefix when exposed into adapter-owned
+- managed assets are exposed under the `ply-` prefix in adapter-owned
   namespaces
 
 ## Core workflows
@@ -133,8 +133,8 @@ Git source `rev` accepts:
 Shared project intent lives in `ply.toml`.
 
 `ply.local.toml` is optional and local-only. Use it to override or add
-sources, packages, and overlays on one machine without changing the shared
-project manifest.
+sources and overlays on one machine without changing the shared project
+manifest.
 
 Example:
 
@@ -176,22 +176,25 @@ example-review/
 ├── ply-package.toml
 ├── commands/
 ├── agents/
-│   └── ply-reviewer/
+│   └── reviewer/
 │       └── AGENT.md
 ├── hooks/
 ├── local-instructions.md
 ├── output-styles/
 ├── rules/
 └── skills/
-    └── ply-review-diff/
+    └── review-diff/
         └── SKILL.md
 ```
 
-Managed assets must use the `ply-` prefix at the top level, for example:
+Package authors can use natural top-level names. Ply prefixes managed exposed
+assets with `ply-` automatically when writing into adapter-owned namespaces.
 
-- `skills/ply-review-diff/`
-- `agents/ply-reviewer/`
-- `commands/ply-pr-review.md`
+Examples:
+
+- `skills/review-diff/` is exposed as `.claude/skills/ply-review-diff/`
+- `agents/reviewer/` is exposed as `.claude/agents/ply-reviewer/`
+- `commands/pr-review.md` is exposed as `.claude/commands/ply-pr-review.md`
 
 `agents/` uses shared Markdown authoring. Each agent resource lives in its own
 directory and provides `AGENT.md` as the instruction source document.
@@ -228,10 +231,10 @@ Package resources target all adapters enabled in the consuming project's
 
 To limit a resource to selected adapters, add metadata with a `targets` list:
 
-- directory resources such as `skills/ply-review-diff/` use
-  `skills/ply-review-diff/ply-asset.toml`
-- file resources such as `commands/ply-pr-review.md` use a sidecar file like
-  `commands/ply-pr-review.md.ply-asset.toml`
+- directory resources such as `skills/review-diff/` use
+  `skills/review-diff/ply-asset.toml`
+- file resources such as `commands/pr-review.md` use a sidecar file like
+  `commands/pr-review.md.ply-asset.toml`
 
 This is especially useful for adapter-specific kinds such as `agents`, which
 render differently per adapter.

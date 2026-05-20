@@ -276,12 +276,12 @@ impl InitCli {
 
         let ignore_config = match self.ignore_config {
             Some(value) => value,
-            None if self.yes => false,
+            None if self.yes => true,
             None => ui::prompt_yes_no(
                 "Ignore Ply config locally",
                 "Do you want all Ply files to stay ignored in this target when it is a Git repo, including `ply.toml`, `ply.lock`, and `ply-packages/`?",
                 "Keep Ply config ignored locally",
-                false,
+                true,
             )
             .map_err(|err| anyhow!("failed to read init option: {err}"))?,
         };
@@ -568,7 +568,7 @@ Commands:
 Options:
   --with-packages     scaffold a local `ply-packages/` source
   --without-packages  do not create a local package source
-  --ignore-config     keep Ply config ignored locally when the target is a Git repo
+  --ignore-config     keep Ply config ignored locally when the target is a Git repo (default)
   --track-config      keep Ply configuration trackable
   --global, -g        target the user-global Ply root
   --dry-run           preview what init would create
@@ -763,6 +763,21 @@ mod tests {
             }
             other => panic!("expected init package command, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn init_yes_defaults_to_ignored_config() -> Result<()> {
+        let request = InitCli {
+            scaffold_local_packages: Some(false),
+            ignore_config: None,
+            yes: true,
+            global: false,
+            dry_run: false,
+        }
+        .resolve()?;
+
+        assert!(request.options.ignore_config);
         Ok(())
     }
 }

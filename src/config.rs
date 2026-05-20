@@ -338,20 +338,20 @@ pub fn write_default_local_manifest(project_root: &Path) -> Result<()> {
 
 pub fn write_default_package_fixture(project_root: &Path) -> Result<()> {
     let package_dir = project_root.join("ply-packages").join("example-review");
-    let skill = package_dir.join("skills").join("ply-review-diff");
+    let skill = package_dir.join("skills").join("review-diff");
     fs::create_dir_all(&skill)?;
     let pkg = package_dir.join("ply-package.toml");
     if !pkg.exists() {
         fs::write(
             &pkg,
-            "name = \"ply-review-diff\"\ndescription = \"Review-diff skill\"\n",
+            "name = \"review-diff\"\ndescription = \"Review-diff skill\"\n",
         )?;
     }
     let readme = skill.join("SKILL.md");
     if !readme.exists() {
         fs::write(
             &readme,
-            "# ply-review-diff\n\nReview a diff with a bug-first mindset.\n",
+            "# review-diff\n\nReview a diff with a bug-first mindset.\n",
         )?;
     }
     Ok(())

@@ -122,6 +122,32 @@ struct AssetMetadata {
 const PLY_MANAGED_START: &str = "<!-- ply:start -->";
 const PLY_MANAGED_END: &str = "<!-- ply:end -->";
 
+fn ensure_managed_name(kind: AssetKind, name: &str) -> String {
+    if !kind.requires_ply_prefix() || name.starts_with("ply-") {
+        return name.to_string();
+    }
+    format!("ply-{name}")
+}
+
+fn managed_relative_path(kind: AssetKind, relative_path: &Path) -> Result<PathBuf> {
+    if !kind.requires_ply_prefix() {
+        return Ok(relative_path.to_path_buf());
+    }
+
+    let mut components = relative_path.components();
+    let first = components
+        .next()
+        .ok_or_else(|| anyhow!("empty managed asset path"))?
+        .as_os_str()
+        .to_string_lossy()
+        .to_string();
+    let mut managed = PathBuf::from(ensure_managed_name(kind, &first));
+    for component in components {
+        managed.push(component.as_os_str());
+    }
+    Ok(managed)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CommandTarget {
     Project,
@@ -1221,14 +1247,9 @@ fn collect_prompt_document_plan(
         return Ok(());
     }
     let logical_name = prompt_logical_name(source_file)?;
-    if kind.requires_ply_prefix() && !logical_name.starts_with("ply-") {
-        return Err(anyhow!(
-            "managed asset `{}` must use the `ply-` prefix",
-            source_file.display()
-        ));
-    }
+    let managed_name = ensure_managed_name(kind, &logical_name);
     let markdown = fs::read_to_string(source_file)?;
-    let resource = parse_prompt_resource(kind, &logical_name, &markdown)?;
+    let resource = parse_prompt_resource(kind, &managed_name, &markdown)?;
 
     match (adapter, kind) {
         (AdapterKind::Claude, AssetKind::Commands)
@@ -1237,12 +1258,12 @@ fn collect_prompt_document_plan(
             let rel = source_file
                 .file_name()
                 .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
-            let rel = PathBuf::from(rel);
+            let rel = managed_relative_path(kind, Path::new(rel))?;
             push_rendered_file(
                 project_root,
                 adapter,
                 kind,
-                logical_name,
+                managed_name,
                 rel,
                 rendered.into_bytes(),
                 origin_layer,
@@ -1257,12 +1278,12 @@ fn collect_prompt_document_plan(
             let rel = source_file
                 .file_name()
                 .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
-            let rel = PathBuf::from(rel);
+            let rel = managed_relative_path(kind, Path::new(rel))?;
             push_rendered_file(
                 project_root,
                 adapter,
                 kind,
-                logical_name,
+                managed_name,
                 rel,
                 rendered.into_bytes(),
                 origin_layer,
@@ -1315,12 +1336,7 @@ fn collect_prompt_directory_plan(
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", resource_dir.display()))?
         .to_string();
-    if kind.requires_ply_prefix() && !logical_name.starts_with("ply-") {
-        return Err(anyhow!(
-            "managed asset `{}` must use the `ply-` prefix",
-            logical_name
-        ));
-    }
+    let managed_name = ensure_managed_name(kind, &logical_name);
     let parent = resource_dir
         .parent()
         .ok_or_else(|| anyhow!("resource directory `{}` has no parent", resource_dir.display()))?;
@@ -1347,7 +1363,7 @@ fn collect_prompt_directory_plan(
     }
 
     let markdown = fs::read_to_string(&primary_path)?;
-    let resource = parse_prompt_resource(kind, &logical_name, &markdown)?;
+    let resource = parse_prompt_resource(kind, &managed_name, &markdown)?;
 
     match (adapter, kind) {
         (AdapterKind::Claude, AssetKind::Skills) | (AdapterKind::Claude, AssetKind::Agents) => {
@@ -1356,8 +1372,8 @@ fn collect_prompt_directory_plan(
                 project_root,
                 adapter,
                 kind,
-                logical_name.clone(),
-                PathBuf::from(&logical_name).join(primary_name),
+                managed_name.clone(),
+                PathBuf::from(&managed_name).join(primary_name),
                 rendered.into_bytes(),
                 origin_layer,
                 origin_detail.clone(),
@@ -1370,7 +1386,7 @@ fn collect_prompt_directory_plan(
                 adapter,
                 kind,
                 resource_dir,
-                &logical_name,
+                &managed_name,
                 &primary_path,
                 origin_layer,
                 origin_detail,
@@ -1384,8 +1400,8 @@ fn collect_prompt_directory_plan(
                 project_root,
                 adapter,
                 kind,
-                logical_name.clone(),
-                PathBuf::from(&logical_name).join(primary_name),
+                managed_name.clone(),
+                PathBuf::from(&managed_name).join(primary_name),
                 rendered.into_bytes(),
                 origin_layer,
                 origin_detail.clone(),
@@ -1398,7 +1414,7 @@ fn collect_prompt_directory_plan(
                 adapter,
                 kind,
                 resource_dir,
-                &logical_name,
+                &managed_name,
                 &primary_path,
                 origin_layer,
                 origin_detail.clone(),
@@ -1410,7 +1426,7 @@ fn collect_prompt_directory_plan(
                     project_root,
                     adapter,
                     kind,
-                    logical_name,
+                    managed_name,
                     PathBuf::from(resource.logical_name.as_str())
                         .join("agents")
                         .join("openai.yaml"),
@@ -1430,16 +1446,16 @@ fn collect_prompt_directory_plan(
                 .join("generated")
                 .join("codex")
                 .join("agents")
-                .join(format!("{logical_name}.toml"));
+                .join(format!("{managed_name}.toml"));
             let exposed_relative_path = PathBuf::from(".codex")
                 .join("agents")
-                .join(format!("{logical_name}.toml"));
+                .join(format!("{managed_name}.toml"));
             if let Some(index) = seen.get(&generated_relative_path).copied() {
                 plan[index] = PlannedFile {
                     adapter: AdapterKind::Codex,
                     kind: AssetKind::Agents,
                     exposure_mode: ExposureMode::GeneratedComposite,
-                    relative_name: logical_name,
+                    relative_name: managed_name,
                     generated_relative_path,
                     exposed_relative_path,
                     contents: rendered.into_bytes(),
@@ -1453,7 +1469,7 @@ fn collect_prompt_directory_plan(
                     adapter: AdapterKind::Codex,
                     kind: AssetKind::Agents,
                     exposure_mode: ExposureMode::GeneratedComposite,
-                    relative_name: logical_name,
+                    relative_name: managed_name,
                     generated_relative_path,
                     exposed_relative_path,
                     contents: rendered.into_bytes(),
@@ -1604,29 +1620,25 @@ fn collect_planned_files(
         if !resource_targets_adapter(metadata.as_ref(), adapter)? {
             continue;
         }
-        if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
-            return Err(anyhow!(
-                "managed asset `{}` must use the `ply-` prefix",
-                rel.display()
-            ));
-        }
+        let managed_name = ensure_managed_name(kind, &top_level_name);
+        let managed_rel = managed_relative_path(kind, rel)?;
 
         let generated_relative_path = PathBuf::from(".ply")
             .join("generated")
             .join(adapter.as_str())
             .join(kind.as_str())
-            .join(rel);
+            .join(&managed_rel);
         let exposed_root = adapter
             .direct_asset_root(project_root, kind)
             .ok_or_else(|| anyhow!("no direct root for `{}` `{}`", adapter.as_str(), kind.as_str()))?;
-        let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(rel);
+        let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(&managed_rel);
 
         if let Some(index) = seen.get(&generated_relative_path).copied() {
             plan[index] = PlannedFile {
                 adapter,
                 kind,
                 exposure_mode: ExposureMode::Direct,
-                relative_name: top_level_name,
+                relative_name: managed_name,
                 generated_relative_path,
                 exposed_relative_path,
                 contents: fs::read(&file)?,
@@ -1640,7 +1652,7 @@ fn collect_planned_files(
                 adapter,
                 kind,
                 exposure_mode: ExposureMode::Direct,
-                relative_name: top_level_name,
+                relative_name: managed_name,
                 generated_relative_path,
                 exposed_relative_path,
                 contents: fs::read(&file)?,
@@ -1708,12 +1720,6 @@ fn collect_directory_sections(
             .map_err(|err| anyhow!(err.to_string()))?;
         if !resource_targets_adapter(metadata.as_ref(), adapter)? {
             continue;
-        }
-        if kind.requires_ply_prefix() && !top_level_name.starts_with("ply-") {
-            return Err(anyhow!(
-                "managed asset `{}` must use the `ply-` prefix",
-                rel.display()
-            ));
         }
         let content = fs::read_to_string(&file)?;
         if content.trim().is_empty() {
@@ -2496,14 +2502,14 @@ mod tests {
     fn apply_uses_source_root_without_package_selection() -> Result<()> {
         let temp = make_project()?;
         let package_root = temp.path().join("fixture-package");
-        fs::create_dir_all(package_root.join("skills").join("ply-check"))?;
+        fs::create_dir_all(package_root.join("skills").join("check"))?;
         write(
             &package_root.join("ply-package.toml"),
             "name = \"fixture-package\"\n",
         )?;
         write(
-            &package_root.join("skills").join("ply-check").join("SKILL.md"),
-            "# ply-check\n",
+            &package_root.join("skills").join("check").join("SKILL.md"),
+            "# check\n",
         )?;
         let manifest = format!(
             "schema_version = 1\nadapters = [\"codex\", \"claude\"]\n\n[install]\nmode = \"copy\"\nuse_global = false\n\n[[sources]]\nid = \"fixture\"\nkind = \"path\"\npath = \"{}\"\n",
@@ -2550,11 +2556,11 @@ mod tests {
             },
         )?;
         let package_root = example_package_root(temp.path());
-        let agent_dir = package_root.join("agents").join("ply-reviewer");
+        let agent_dir = package_root.join("agents").join("reviewer");
         fs::create_dir_all(&agent_dir)?;
         write(
             &agent_dir.join("AGENT.md"),
-            "# ply-reviewer\n\nPly-managed agent for focused review.\n\nReview carefully.\n",
+            "# reviewer\n\nPly-managed agent for focused review.\n\nReview carefully.\n",
         )?;
 
         apply(
@@ -2601,11 +2607,11 @@ mod tests {
             },
         )?;
         let package_root = example_package_root(temp.path());
-        let agent_dir = package_root.join("agents").join("ply-claude-reviewer");
+        let agent_dir = package_root.join("agents").join("claude-reviewer");
         fs::create_dir_all(&agent_dir)?;
         write(
             &agent_dir.join("AGENT.md"),
-            "# ply-claude-reviewer\n\nClaude-only agent.\n",
+            "# claude-reviewer\n\nClaude-only agent.\n",
         )?;
         write(
             &agent_dir.join("ply-asset.toml"),
@@ -2656,20 +2662,20 @@ mod tests {
         write(
             &package_root
                 .join("skills")
-                .join("ply-review-diff")
+                .join("review-diff")
                 .join("ply-asset.toml"),
             "targets = [\"claude\"]\n",
         )?;
-        let codex_only = package_root.join("skills").join("ply-codex-only");
+        let codex_only = package_root.join("skills").join("codex-only");
         fs::create_dir_all(&codex_only)?;
-        write(&codex_only.join("SKILL.md"), "# ply-codex-only\n")?;
+        write(&codex_only.join("SKILL.md"), "# codex-only\n")?;
         write(
             &codex_only.join("ply-asset.toml"),
             "targets = [\"codex\"]\n",
         )?;
-        let shared = package_root.join("skills").join("ply-shared");
+        let shared = package_root.join("skills").join("shared");
         fs::create_dir_all(&shared)?;
-        write(&shared.join("SKILL.md"), "# ply-shared\n")?;
+        write(&shared.join("SKILL.md"), "# shared\n")?;
 
         apply(
             temp.path(),
@@ -2748,11 +2754,11 @@ mod tests {
         let commands_dir = package_root.join("commands");
         fs::create_dir_all(&commands_dir)?;
         write(
-            &commands_dir.join("ply-codex-only.md"),
+            &commands_dir.join("codex-only.md"),
             "Run Codex-specific review steps.\n",
         )?;
         write(
-            &commands_dir.join("ply-codex-only.md.ply-asset.toml"),
+            &commands_dir.join("codex-only.md.ply-asset.toml"),
             "targets = [\"codex\"]\n",
         )?;
         write(
@@ -2963,7 +2969,7 @@ mod tests {
         let package_root = example_package_root(temp.path());
 
         write(
-            &package_root.join("commands").join("ply-docs.md"),
+            &package_root.join("commands").join("docs.md"),
             r#"---
 name: docs-helper
 description: Help with project documentation
@@ -2982,7 +2988,7 @@ Write concise documentation for $ARGUMENTS.
 "#,
         )?;
 
-        let skill_root = package_root.join("skills").join("ply-writer");
+        let skill_root = package_root.join("skills").join("writer");
         fs::create_dir_all(skill_root.join("scripts"))?;
         write(
             &skill_root.join("SKILL.md"),
@@ -3011,7 +3017,7 @@ Write clearly and cite facts.
             "#!/usr/bin/env bash\necho helper\n",
         )?;
 
-        let agent_root = package_root.join("agents").join("ply-reviewer");
+        let agent_root = package_root.join("agents").join("reviewer");
         fs::create_dir_all(&agent_root)?;
         write(
             &agent_root.join("AGENT.md"),
@@ -3035,7 +3041,7 @@ Review carefully and surface findings first.
         write(
             &package_root
                 .join("output-styles")
-                .join("ply-concise.md"),
+                .join("concise.md"),
             r#"---
 name: Concise
 description: Keep responses tight
@@ -3142,9 +3148,9 @@ Use short, direct responses.
             },
         )?;
         let package_root = example_package_root(temp.path());
-        let skill_root = package_root.join("skills").join("ply-bad-sidecar");
+        let skill_root = package_root.join("skills").join("bad-sidecar");
         fs::create_dir_all(skill_root.join("agents"))?;
-        write(&skill_root.join("SKILL.md"), "# ply-bad-sidecar\n")?;
+        write(&skill_root.join("SKILL.md"), "# bad-sidecar\n")?;
         write(
             &skill_root.join("agents").join("openai.yaml"),
             "interface:\n  display_name: Bad\n",
