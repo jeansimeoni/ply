@@ -69,7 +69,6 @@ impl AdapterKind {
             | (Self::Claude, AssetKind::Rules)
             | (Self::Claude, AssetKind::Hooks)
             | (Self::Claude, AssetKind::OutputStyles) => true,
-            _ => false,
         }
     }
 

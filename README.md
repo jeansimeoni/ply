@@ -54,9 +54,15 @@ Implemented behavior:
   - `rules`
   - `hooks`
   - `output-styles`
+- shared frontmatter-based authoring for prompt resources:
+  - `commands`
+  - `skills`
+  - `agents`
+  - `output-styles`
 - managed-block updates for `CLAUDE.local.md`
 - generated local composite output for `AGENTS.override.md`
 - Codex hook registration through `.codex/hooks.json`
+- generated Codex agent `.toml` files and Codex skill `agents/openai.yaml` sidecars
 - grouped drift and safety reporting in `ply diff`
 - validation of ignore coverage and state drift in `ply doctor`
 - local-only Git ignore management via `.git/info/exclude`
@@ -190,6 +196,31 @@ Managed assets must use the `ply-` prefix at the top level, for example:
 `agents/` uses shared Markdown authoring. Each agent resource lives in its own
 directory and provides `AGENT.md` as the instruction source document.
 
+`skills/`, `commands/`, `agents/`, and `output-styles/` are prompt resources.
+They can use shared YAML frontmatter plus adapter-specific sections. `rules/`
+and `hooks/` remain native adapter resources and are not part of this
+frontmatter system.
+
+Example:
+
+```md
+---
+name: technical-writer
+description: Write clear technical documentation
+
+claude:
+  tools:
+    - Read
+    - Write
+
+codex:
+  model: gpt-5.5
+  reasoning_effort: medium
+---
+
+Write accurate documentation with verifiable examples.
+```
+
 ## Per-resource adapter targeting
 
 Package resources target all adapters enabled in the consuming project's
@@ -253,7 +284,19 @@ outputs:
 
 - Claude receives the authored `agents/<name>/` directory directly
 - Codex receives a generated `.codex/agents/<name>.toml` file with `name`,
-  inferred `description`, and `developer_instructions` from `AGENT.md`
+  `description`, and `developer_instructions` from `AGENT.md`
+
+For `skills`, Ply keeps `SKILL.md` and companion directories shared while
+also rendering Codex-native skill metadata when needed:
+
+- Claude receives the authored `SKILL.md` plus companion files
+- Codex receives the authored `SKILL.md` plus companion files
+- Codex also receives generated `agents/openai.yaml` when Codex skill metadata
+  is present in frontmatter
+
+For `commands` and Codex `output-styles`, Codex-specific metadata is translated
+into a deterministic generated settings preamble inside the exposed Markdown or
+generated `AGENTS.override.md` sections.
 
 Ply is intentionally conservative around repository-owned files:
 
