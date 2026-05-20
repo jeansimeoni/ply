@@ -7,6 +7,25 @@ Ply is local-first and additive. It installs reusable agent assets without
 taking ownership of repository-managed instruction files such as `AGENTS.md` or
 `CLAUDE.md`.
 
+## Documentation
+
+User and package-author docs live under [`docs/`](docs/).
+
+- Guides for Ply users:
+  - [Consume packages in a project repo](docs/guides/consume-packages-project.md)
+  - [Use a global Ply layer](docs/guides/global-layer.md)
+  - [Inspect, update, and clean managed assets](docs/guides/manage-managed-assets.md)
+- Guides for package creators:
+  - [Create your first package](docs/guides/create-package.md)
+- Shared reference:
+  - [Package format and asset kinds](docs/reference/package-format.md)
+  - [Configuration and layering](docs/reference/configuration-and-layering.md)
+  - [CLI command reference](docs/reference/cli.md)
+  - [Troubleshooting](docs/reference/troubleshooting.md)
+
+Current docs assume the `ply` binary is already available in your shell.
+End-user installation instructions are not documented yet.
+
 ## Development
 
 This repository uses [`mise`](https://mise.jdx.dev/) to pin the Rust toolchain.
