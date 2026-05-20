@@ -15,6 +15,7 @@ use crate::git;
 use crate::prompt_resources::{
     is_prompt_resource, parse_prompt_resource, primary_markdown_name, prompt_logical_name,
     render_claude_markdown, render_codex_agent, render_codex_prompt_preamble,
+    render_codex_skill_markdown,
     render_codex_skill_sidecar,
 };
 use crate::ui::{self, Tone};
@@ -1395,7 +1396,7 @@ fn collect_prompt_directory_plan(
             )
         }
         (AdapterKind::Codex, AssetKind::Skills) => {
-            let rendered = render_codex_prompt_markdown(&resource);
+            let rendered = render_codex_skill_markdown(&resource)?;
             push_rendered_file(
                 project_root,
                 adapter,

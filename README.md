@@ -293,7 +293,8 @@ For `skills`, Ply keeps `SKILL.md` and companion directories shared while
 also rendering Codex-native skill metadata when needed:
 
 - Claude receives the authored `SKILL.md` plus companion files
-- Codex receives the authored `SKILL.md` plus companion files
+- Codex receives a generated `SKILL.md` with required YAML frontmatter plus the
+  companion files
 - Codex also receives generated `agents/openai.yaml` when Codex skill metadata
   is present in frontmatter
 

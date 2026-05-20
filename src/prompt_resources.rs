@@ -317,6 +317,31 @@ pub fn render_codex_skill_sidecar(resource: &ParsedPromptResource) -> Result<Opt
     Ok(Some(serde_yaml::to_string(&Value::Mapping(map))?))
 }
 
+pub fn render_codex_skill_markdown(resource: &ParsedPromptResource) -> Result<String> {
+    let mut map = Mapping::new();
+    map.insert(
+        Value::String("name".to_string()),
+        Value::String(
+            resource
+                .shared
+                .name
+                .clone()
+                .unwrap_or_else(|| resource.logical_name.clone()),
+        ),
+    );
+    map.insert(
+        Value::String("description".to_string()),
+        Value::String(
+            resource
+                .shared
+                .description
+                .clone()
+                .unwrap_or_else(|| infer_description(&resource.logical_name, &resource.body)),
+        ),
+    );
+    render_markdown_document(map, &resource.body)
+}
+
 pub fn render_codex_prompt_preamble(resource: &ParsedPromptResource) -> Option<String> {
     let mut lines = Vec::new();
     if let Some(model) = &resource.codex.model {
@@ -676,5 +701,20 @@ Body
         )
         .unwrap_err();
         assert!(err.to_string().contains("Codex skill sidecar fields"));
+    }
+
+    #[test]
+    fn codex_skill_render_adds_required_frontmatter() -> Result<()> {
+        let resource = parse_prompt_resource(
+            AssetKind::Skills,
+            "ply-review-skill",
+            "# Review Skill\n\nReview code carefully.\n",
+        )?;
+
+        let rendered = render_codex_skill_markdown(&resource)?;
+        assert!(rendered.starts_with("---\n"));
+        assert!(rendered.contains("name: ply-review-skill"));
+        assert!(rendered.contains("description: Review code carefully."));
+        Ok(())
     }
 }
