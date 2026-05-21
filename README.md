@@ -155,9 +155,12 @@ Use the manifest mutation commands for normal source management:
 ```bash
 ply add --id local --path ./ply-packages/example-review
 ply add --id team --git owner/ply-team --rev main
+ply add --id team --git owner/ply-team --rev main --ssh
+ply add --id team --git owner/ply-team --rev main --ssh-key ~/.ssh/id_ply_team
 ply remove team
 ply update
 ply update local-git-source
+ply add -g --id personal --path /home/you/agent-packages/review-tools
 ```
 
 Ply still uses the current source-only model: each `[[sources]]` entry points
@@ -188,6 +191,9 @@ path = ".ply/overlays/codex/skills"
 
 `ply.ssh.toml` is also optional and local-only. Use it for source-specific
 SSH transport preferences and keys.
+
+`ply add --git --ssh` and `ply add --git --ssh-key <path>` update
+`ply.ssh.toml` for you.
 
 Example:
 

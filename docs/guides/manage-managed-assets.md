@@ -46,6 +46,7 @@ Use:
 ```bash
 ply update
 ply update team
+ply update -g
 ```
 
 when you want to refresh Git source revisions in `ply.lock` without writing

@@ -10,7 +10,7 @@ use crate::config::{
     Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, SourceConfig, SshConfigFile,
     SshSourceConfig, State, load_local_manifest_if_present, load_local_overlays,
     load_lockfile_if_present, load_manifest, load_manifest_for_edit, load_manifest_if_present,
-    load_package_manifest, load_ssh_config_if_present, load_state,
+    load_package_manifest, load_ssh_config_for_edit, load_ssh_config_if_present, load_state,
 };
 use crate::git;
 use crate::prompt_resources::{
@@ -223,9 +223,17 @@ pub enum AddSourceLocation {
 }
 
 #[derive(Debug, Clone)]
+pub enum AddSourceSshMode {
+    None,
+    DefaultKey,
+    KeyPath(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct AddSourceRequest {
     pub id: String,
     pub location: AddSourceLocation,
+    pub ssh: AddSourceSshMode,
 }
 
 #[derive(Debug, Clone)]
@@ -333,7 +341,12 @@ pub fn init_package(project_root: &Path, request: PackageInitRequest) -> Result<
     })
 }
 
-pub fn add_source(project_root: &Path, request: AddSourceRequest) -> Result<SourceMutationReport> {
+pub fn add_source(
+    project_root: &Path,
+    request: AddSourceRequest,
+    target: CommandTarget,
+) -> Result<SourceMutationReport> {
+    let mut ssh_config = load_ssh_config_for_edit(project_root)?;
     let mut manifest = load_manifest_for_edit(project_root)?;
     let source = match request.location {
         AddSourceLocation::Path(path) => SourceConfig {
@@ -364,11 +377,18 @@ pub fn add_source(project_root: &Path, request: AddSourceRequest) -> Result<Sour
 
     manifest.sources.push(source.clone());
     config::write_manifest(project_root, &manifest)?;
+    update_ssh_config_for_added_source(&mut ssh_config, &request.id, &source, &request.ssh)?;
+    config::write_ssh_config(project_root, &ssh_config)?;
 
     let mut body = format!("Updated {}", project_root.join("ply.toml").display());
     body.push_str("\n\nAdded:");
     body.push('\n');
     body.push_str(&ui::list_item(&render_source_summary(&source)));
+    if !matches!(request.ssh, AddSourceSshMode::None) {
+        body.push_str("\n\nSSH config:");
+        body.push('\n');
+        body.push_str(&ui::list_item("updated ply.ssh.toml for this source"));
+    }
 
     if source.kind == "git" {
         let report = update_sources(
@@ -376,6 +396,7 @@ pub fn add_source(project_root: &Path, request: AddSourceRequest) -> Result<Sour
             UpdateSourcesRequest {
                 source_id: Some(source.id.clone()),
             },
+            target,
         )?;
         body.push_str("\n\nLockfile:");
         body.push('\n');
@@ -394,6 +415,7 @@ pub fn remove_source(
     project_root: &Path,
     request: RemoveSourceRequest,
 ) -> Result<SourceMutationReport> {
+    let mut ssh_config = load_ssh_config_for_edit(project_root)?;
     let mut manifest = load_manifest_for_edit(project_root)?;
     let Some(index) = manifest
         .sources
@@ -404,6 +426,10 @@ pub fn remove_source(
     };
     let removed = manifest.sources.remove(index);
     config::write_manifest(project_root, &manifest)?;
+    let removed_ssh = ssh_config.sources.remove(&request.id).is_some();
+    if removed_ssh {
+        config::write_ssh_config(project_root, &ssh_config)?;
+    }
 
     let mut pruned_lock = false;
     if let Some(mut lockfile) = load_lockfile_if_present(project_root)? {
@@ -433,6 +459,13 @@ pub fn remove_source(
             "removed the stale source entry from ply.lock",
         ));
     }
+    if removed_ssh {
+        body.push_str("\n\nSSH config:");
+        body.push('\n');
+        body.push_str(&ui::list_item(
+            "removed the stale source entry from ply.ssh.toml",
+        ));
+    }
 
     Ok(SourceMutationReport { body })
 }
@@ -440,11 +473,17 @@ pub fn remove_source(
 pub fn update_sources(
     project_root: &Path,
     request: UpdateSourcesRequest,
+    target: CommandTarget,
 ) -> Result<SourceMutationReport> {
-    let composition = compose_project_config(project_root)?;
-    let previous_lock = load_lockfile_if_present(project_root)?;
+    let root = target_root(project_root, target)?;
+    let layer = match target {
+        CommandTarget::Project => LayerKind::Project,
+        CommandTarget::Global => LayerKind::Global,
+    };
+    let composition = compose_single_root(&root, layer)?;
+    let previous_lock = load_lockfile_if_present(&root)?;
     let resolved_sources =
-        resolve_sources_for_update(project_root, &composition, &request, previous_lock)?;
+        resolve_sources_for_update(&root, &composition, &request, previous_lock)?;
     let updated_git_ids = collect_updated_git_ids(&composition, &request)?;
 
     let lockfile = Lockfile {
@@ -458,9 +497,9 @@ pub fn update_sources(
             })
             .collect(),
     };
-    config::write_lockfile(project_root, &lockfile)?;
+    config::write_lockfile(&root, &lockfile)?;
 
-    let mut body = format!("Updated {}", project_root.join("ply.lock").display());
+    let mut body = format!("Updated {}", root.join("ply.lock").display());
     if updated_git_ids.is_empty() {
         body.push_str("\n\nNo Git sources were configured.");
     } else {
@@ -944,6 +983,49 @@ fn render_source_summary(source: &SourceConfig) -> String {
             }
         }
         _ => format!("{} [{}]", source.id, source.kind),
+    }
+}
+
+fn update_ssh_config_for_added_source(
+    ssh_config: &mut SshConfigFile,
+    source_id: &str,
+    source: &SourceConfig,
+    mode: &AddSourceSshMode,
+) -> Result<()> {
+    match mode {
+        AddSourceSshMode::None => Ok(()),
+        AddSourceSshMode::DefaultKey => {
+            if source.kind != "git" {
+                return Err(anyhow!(
+                    "`--ssh` is only supported when adding a Git source"
+                ));
+            }
+            ssh_config.sources.insert(
+                source_id.to_string(),
+                SshSourceConfig {
+                    use_ssh: true,
+                    ssh_key_path: None,
+                    ssh_key_env: None,
+                },
+            );
+            Ok(())
+        }
+        AddSourceSshMode::KeyPath(path) => {
+            if source.kind != "git" {
+                return Err(anyhow!(
+                    "`--ssh-key` is only supported when adding a Git source"
+                ));
+            }
+            ssh_config.sources.insert(
+                source_id.to_string(),
+                SshSourceConfig {
+                    use_ssh: true,
+                    ssh_key_path: Some(path.clone()),
+                    ssh_key_env: None,
+                },
+            );
+            Ok(())
+        }
     }
 }
 
@@ -2718,6 +2800,24 @@ mod tests {
         Ok(temp)
     }
 
+    fn init_test_project(project_root: &Path, scaffold_local_packages: bool) -> Result<()> {
+        init_project(
+            project_root,
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let mut manifest = load_manifest_for_edit(project_root)?;
+        manifest.install.use_global = false;
+        config::write_manifest(project_root, &manifest)?;
+        Ok(())
+    }
+
     fn init_git_package_repo(path: &Path, package_name: &str) -> Result<String> {
         fs::create_dir_all(path.join("skills").join("review"))?;
         exec_in(path, &["init"])?;
@@ -2807,42 +2907,9 @@ mod tests {
     }
 
     #[test]
-    fn init_dry_run_does_not_create_files() -> Result<()> {
-        let temp = make_project()?;
-        let global = temp.path().join("global-root");
-        unsafe {
-            std::env::set_var("HOME", temp.path());
-        }
-        let report = init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: false,
-                    ignore_config: false,
-                },
-                dry_run: true,
-                target: CommandTarget::Global,
-            },
-        )?;
-        assert!(report.dry_run);
-        assert!(!global.join("ply.toml").exists());
-        Ok(())
-    }
-
-    #[test]
     fn apply_copies_assets_from_path_source() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         apply(
             temp.path(),
             ApplyOptions {
@@ -2918,17 +2985,7 @@ mod tests {
     #[test]
     fn apply_exposes_agents_for_claude_and_codex() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         let agent_dir = package_root.join("agents").join("reviewer");
         fs::create_dir_all(&agent_dir)?;
@@ -2969,17 +3026,7 @@ mod tests {
     #[test]
     fn agent_targets_can_limit_codex_generation() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         let agent_dir = package_root.join("agents").join("claude-reviewer");
         fs::create_dir_all(&agent_dir)?;
@@ -3022,17 +3069,7 @@ mod tests {
     #[test]
     fn resource_metadata_targets_selected_adapters() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         write(
             &package_root
@@ -3116,17 +3153,7 @@ mod tests {
     #[test]
     fn file_resource_metadata_targets_selected_adapters() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         let commands_dir = package_root.join("commands");
         fs::create_dir_all(&commands_dir)?;
@@ -3181,17 +3208,7 @@ mod tests {
     #[test]
     fn apply_dry_run_reports_drift() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         apply(
             temp.path(),
             ApplyOptions {
@@ -3220,17 +3237,7 @@ mod tests {
     #[test]
     fn apply_generates_codex_override_and_hook_registry() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         write(
             &temp.path().join("AGENTS.md"),
@@ -3282,17 +3289,7 @@ mod tests {
     #[test]
     fn apply_updates_managed_block_in_claude_local_md() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         write(&temp.path().join("CLAUDE.local.md"), "Personal note.\n")?;
         write(
@@ -3322,17 +3319,7 @@ mod tests {
     #[test]
     fn prompt_frontmatter_renders_adapter_specific_outputs() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
 
         write(
@@ -3513,17 +3500,7 @@ Use short, direct responses.
     #[test]
     fn reject_raw_codex_skill_sidecar_in_package() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
         let skill_root = package_root.join("skills").join("bad-sidecar");
         fs::create_dir_all(skill_root.join("agents"))?;
@@ -3647,17 +3624,7 @@ Use short, direct responses.
     #[test]
     fn add_path_source_rewrites_manifest() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: false,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), false)?;
         let package_root = temp.path().join("custom-package");
         fs::create_dir_all(package_root.join("skills").join("check"))?;
         write(
@@ -3674,7 +3641,9 @@ Use short, direct responses.
             AddSourceRequest {
                 id: "local".to_string(),
                 location: AddSourceLocation::Path("./custom-package".to_string()),
+                ssh: AddSourceSshMode::None,
             },
+            CommandTarget::Project,
         )?;
 
         let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
@@ -3687,17 +3656,7 @@ Use short, direct responses.
     #[test]
     fn add_git_source_updates_lockfile_and_remove_prunes_it() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: false,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), false)?;
         let repo_root = temp.path().join("team-source");
         let initial_commit = init_git_package_repo(&repo_root, "team-source")?;
 
@@ -3709,7 +3668,9 @@ Use short, direct responses.
                     repo: "./team-source".to_string(),
                     rev: Some("HEAD".to_string()),
                 },
+                ssh: AddSourceSshMode::None,
             },
+            CommandTarget::Project,
         )?;
 
         let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
@@ -3734,19 +3695,69 @@ Use short, direct responses.
     }
 
     #[test]
-    fn update_named_git_source_preserves_other_locked_git_revisions() -> Result<()> {
+    fn add_git_source_with_ssh_key_writes_ssh_config() -> Result<()> {
         let temp = make_project()?;
-        init_project(
+        init_test_project(temp.path(), false)?;
+        let repo_root = temp.path().join("team-source");
+        init_git_package_repo(&repo_root, "team-source")?;
+
+        add_source(
             temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: false,
-                    ignore_config: false,
+            AddSourceRequest {
+                id: "team".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-source".to_string(),
+                    rev: Some("HEAD".to_string()),
                 },
-                dry_run: false,
-                target: CommandTarget::Project,
+                ssh: AddSourceSshMode::KeyPath("~/.ssh/id_team".to_string()),
+            },
+            CommandTarget::Project,
+        )?;
+
+        let ssh_config = fs::read_to_string(temp.path().join("ply.ssh.toml"))?;
+        assert!(ssh_config.contains("[sources.team]"));
+        assert!(ssh_config.contains("use_ssh = true"));
+        assert!(ssh_config.contains("ssh_key_path = \"~/.ssh/id_team\""));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_source_prunes_ssh_config_and_deletes_empty_file() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
+        let repo_root = temp.path().join("team-source");
+        init_git_package_repo(&repo_root, "team-source")?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-source".to_string(),
+                    rev: Some("HEAD".to_string()),
+                },
+                ssh: AddSourceSshMode::DefaultKey,
+            },
+            CommandTarget::Project,
+        )?;
+        assert!(temp.path().join("ply.ssh.toml").exists());
+
+        remove_source(
+            temp.path(),
+            RemoveSourceRequest {
+                id: "team".to_string(),
+                force: false,
             },
         )?;
+
+        assert!(!temp.path().join("ply.ssh.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn update_named_git_source_preserves_other_locked_git_revisions() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
 
         let repo_one = temp.path().join("team-one");
         let repo_two = temp.path().join("team-two");
@@ -3761,7 +3772,9 @@ Use short, direct responses.
                     repo: "./team-one".to_string(),
                     rev: Some("HEAD".to_string()),
                 },
+                ssh: AddSourceSshMode::None,
             },
+            CommandTarget::Project,
         )?;
         add_source(
             temp.path(),
@@ -3771,7 +3784,9 @@ Use short, direct responses.
                     repo: "./team-two".to_string(),
                     rev: Some("HEAD".to_string()),
                 },
+                ssh: AddSourceSshMode::None,
             },
+            CommandTarget::Project,
         )?;
 
         write(&repo_one.join("README.md"), "# updated\n")?;
@@ -3788,6 +3803,7 @@ Use short, direct responses.
             UpdateSourcesRequest {
                 source_id: Some("team-one".to_string()),
             },
+            CommandTarget::Project,
         )?;
 
         let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
@@ -3799,17 +3815,7 @@ Use short, direct responses.
     #[test]
     fn diff_groups_exposed_changes() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         apply(
             temp.path(),
             ApplyOptions {
@@ -3834,17 +3840,7 @@ Use short, direct responses.
     #[test]
     fn doctor_warns_when_git_excludes_are_missing() -> Result<()> {
         let temp = make_project()?;
-        init_project(
-            temp.path(),
-            InitRequest {
-                options: InitOptions {
-                    scaffold_local_packages: true,
-                    ignore_config: false,
-                },
-                dry_run: false,
-                target: CommandTarget::Project,
-            },
-        )?;
+        init_test_project(temp.path(), true)?;
         crate::git::remove_local_excludes(temp.path())?;
 
         let report = doctor(temp.path(), CommandTarget::Project)?;

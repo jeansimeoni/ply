@@ -10,8 +10,8 @@ use anyhow::{Result, anyhow};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::InitOptions;
 use ops::{
-    AddSourceLocation, AddSourceRequest, ApplyOptions, CleanOptions, CommandTarget, InitRequest,
-    PackageInitRequest, RemoveSourceRequest, UpdateSourcesRequest,
+    AddSourceLocation, AddSourceRequest, AddSourceSshMode, ApplyOptions, CleanOptions,
+    CommandTarget, InitRequest, PackageInitRequest, RemoveSourceRequest, UpdateSourcesRequest,
 };
 use std::env;
 use std::path::Path;
@@ -33,8 +33,13 @@ pub fn print_error(err: &anyhow::Error) {
 }
 
 fn run_command(project_root: &Path, command: Command) -> Result<()> {
-    if command.requires_init() {
-        config::ensure_initialized(project_root)?;
+    if let Some(target) = command.init_target() {
+        let root = resolve_target_root(project_root, target)?;
+        let hint = match target {
+            CommandTarget::Project => "ply init",
+            CommandTarget::Global => "ply init -g",
+        };
+        config::ensure_initialized_with_hint(&root, hint)?;
     }
 
     match command {
@@ -136,6 +141,13 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             );
         }
         Command::Add(options) => {
+            let target = command_target(options.global);
+            let root = resolve_target_root(project_root, target)?;
+            let ssh = match (&options.ssh, &options.ssh_key) {
+                (true, None) => AddSourceSshMode::DefaultKey,
+                (false, Some(path)) => AddSourceSshMode::KeyPath(path.clone()),
+                _ => AddSourceSshMode::None,
+            };
             let location = match (options.path, options.git) {
                 (Some(path), None) => AddSourceLocation::Path(path),
                 (None, Some(repo)) => AddSourceLocation::Git {
@@ -149,17 +161,21 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 }
             };
             let report = ops::add_source(
-                project_root,
+                &root,
                 AddSourceRequest {
                     id: options.id,
                     location,
+                    ssh,
                 },
+                target,
             )?;
             ui::print_stdout(Tone::Success, "Updated manifest", &report.body);
         }
         Command::Remove(options) => {
+            let target = command_target(options.global);
+            let root = resolve_target_root(project_root, target)?;
             let report = ops::remove_source(
-                project_root,
+                &root,
                 RemoveSourceRequest {
                     id: options.source_id,
                     force: options.force,
@@ -168,11 +184,13 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             ui::print_stdout(Tone::Warning, "Updated manifest", &report.body);
         }
         Command::Update(options) => {
+            let target = command_target(options.global);
             let report = ops::update_sources(
                 project_root,
                 UpdateSourcesRequest {
                     source_id: options.source_id,
                 },
+                target,
             )?;
             ui::print_stdout(Tone::Success, "Updated sources", &report.body);
         }
@@ -387,16 +405,24 @@ struct TargetCli {
 struct AddCli {
     #[arg(long)]
     id: String,
+    #[arg(long, short = 'g')]
+    global: bool,
     #[arg(long, group = "source_locator")]
     path: Option<String>,
     #[arg(long = "git", group = "source_locator")]
     git: Option<String>,
     #[arg(long, requires = "git")]
     rev: Option<String>,
+    #[arg(long, requires = "git", conflicts_with = "ssh_key")]
+    ssh: bool,
+    #[arg(long = "ssh-key", requires = "git", conflicts_with = "ssh")]
+    ssh_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
 struct RemoveCli {
+    #[arg(long, short = 'g')]
+    global: bool,
     source_id: String,
     #[arg(long)]
     force: bool,
@@ -404,6 +430,8 @@ struct RemoveCli {
 
 #[derive(Debug, Clone, Args)]
 struct UpdateCli {
+    #[arg(long, short = 'g')]
+    global: bool,
     source_id: Option<String>,
 }
 
@@ -494,18 +522,17 @@ impl From<ApplyCli> for ApplyOptions {
 }
 
 impl Command {
-    fn requires_init(&self) -> bool {
-        matches!(
-            self,
-            Self::Apply(_)
-                | Self::Diff
-                | Self::Doctor(TargetCli { global: false })
-                | Self::List(TargetCli { global: false })
-                | Self::Sources(TargetCli { global: false })
-                | Self::Add(_)
-                | Self::Remove(_)
-                | Self::Update(_)
-        )
+    fn init_target(&self) -> Option<CommandTarget> {
+        match self {
+            Self::Apply(_) | Self::Diff => Some(CommandTarget::Project),
+            Self::Doctor(target) => (!target.global).then_some(CommandTarget::Project),
+            Self::List(target) => (!target.global).then_some(CommandTarget::Project),
+            Self::Sources(target) => (!target.global).then_some(CommandTarget::Project),
+            Self::Add(options) => Some(command_target(options.global)),
+            Self::Remove(options) => Some(command_target(options.global)),
+            Self::Update(options) => Some(command_target(options.global)),
+            _ => None,
+        }
     }
 }
 
@@ -580,6 +607,13 @@ fn command_target(global: bool) -> CommandTarget {
     }
 }
 
+fn resolve_target_root(project_root: &Path, target: CommandTarget) -> Result<std::path::PathBuf> {
+    match target {
+        CommandTarget::Project => Ok(project_root.to_path_buf()),
+        CommandTarget::Global => config::global_root(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,15 +633,22 @@ mod tests {
             Command::Sources(TargetCli { global: false }),
             Command::Add(AddCli {
                 id: "local".to_string(),
+                global: false,
                 path: Some("./ply-packages/example-review".to_string()),
                 git: None,
                 rev: None,
+                ssh: false,
+                ssh_key: None,
             }),
             Command::Remove(RemoveCli {
+                global: false,
                 source_id: "local".to_string(),
                 force: false,
             }),
-            Command::Update(UpdateCli { source_id: None }),
+            Command::Update(UpdateCli {
+                global: false,
+                source_id: None,
+            }),
         ] {
             let err = run_command(temp.path(), command).unwrap_err();
             let message = err.to_string();
@@ -739,8 +780,51 @@ mod tests {
         match cli.command.expect("command should be present") {
             Command::Add(options) => {
                 assert_eq!(options.id, "team");
+                assert!(!options.global);
                 assert_eq!(options.git.as_deref(), Some("owner/repo"));
                 assert_eq!(options.rev.as_deref(), Some("main"));
+                assert!(!options.ssh);
+                assert_eq!(options.ssh_key, None);
+            }
+            other => panic!("expected add command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_global_update_flag() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "update".to_string(),
+            "--global".to_string(),
+            "team".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Update(options) => {
+                assert!(options.global);
+                assert_eq!(options.source_id.as_deref(), Some("team"));
+            }
+            other => panic!("expected update command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_add_git_source_ssh_key_flag() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "add".to_string(),
+            "--id".to_string(),
+            "team".to_string(),
+            "--git".to_string(),
+            "owner/repo".to_string(),
+            "--ssh-key".to_string(),
+            "~/.ssh/id_team".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Add(options) => {
+                assert_eq!(options.ssh_key.as_deref(), Some("~/.ssh/id_team"));
+                assert!(!options.ssh);
             }
             other => panic!("expected add command, got {other:?}"),
         }

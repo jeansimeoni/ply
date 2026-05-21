@@ -49,14 +49,14 @@ Unlike project mode, global mode does not require a Git repository.
 
 ## Add global sources
 
-Use `ply add` from `~/.config/ply` or edit `ply.toml` directly to add the
+Use `ply add -g` from any directory or edit `ply.toml` directly to add the
 sources you want available to all participating projects.
 
 Example command:
 
 ```bash
-cd ~/.config/ply
-ply add --id personal --path /home/you/agent-packages/review-tools
+ply add -g --id personal --path /home/you/agent-packages/review-tools
+ply add -g --id team --git owner/repo --rev main --ssh
 ```
 
 Example:

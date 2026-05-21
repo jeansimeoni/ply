@@ -78,35 +78,40 @@ Notes:
 Add one source to `ply.toml`.
 
 ```txt
-ply add --id <id> --path <path>
-ply add --id <id> --git <repo> [--rev <rev>]
+ply add [--global] --id <id> --path <path>
+ply add [--global] --id <id> --git <repo> [--rev <rev>] [--ssh | --ssh-key <path>]
 ```
 
 Notes:
 
 - exactly one of `--path` or `--git` is required
 - `--rev` is only valid with `--git`
+- `--ssh` marks the Git source to use SSH transport with the default SSH key
+- `--ssh-key <path>` marks the Git source to use SSH transport with a specific key path
+- `--ssh` and `--ssh-key` update `ply.ssh.toml`
 - adding a Git source also refreshes `ply.lock`
+- `--global`, `-g` mutates `~/.config/ply/ply.toml`
 
 ## `ply remove`
 
 Remove one source from `ply.toml`.
 
 ```txt
-ply remove <source-id> [--force]
+ply remove [--global] <source-id> [--force]
 ```
 
 Notes:
 
 - `--force` is reserved for future compatibility
 - successful removal prunes the matching `ply.lock` entry if present
+- `--global`, `-g` mutates `~/.config/ply/ply.toml`
 
 ## `ply update`
 
 Refresh Git sources and rewrite `ply.lock`.
 
 ```txt
-ply update [source-id]
+ply update [--global] [source-id]
 ```
 
 Notes:
@@ -114,6 +119,7 @@ Notes:
 - without a `source-id`, all configured Git sources are refreshed
 - with a `source-id`, that source must resolve to a Git source
 - `ply update` does not run `ply apply`
+- `--global`, `-g` refreshes sources for `~/.config/ply`
 
 ## `ply diff`
 

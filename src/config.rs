@@ -174,10 +174,6 @@ impl Default for InstallConfig {
     }
 }
 
-pub fn ensure_initialized(project_root: &Path) -> Result<()> {
-    ensure_initialized_with_hint(project_root, "ply init")
-}
-
 pub fn ensure_initialized_with_hint(project_root: &Path, hint: &str) -> Result<()> {
     let path = project_root.join("ply.toml");
     if path.exists() {
@@ -227,6 +223,10 @@ pub fn load_ssh_config_if_present(project_root: &Path) -> Result<Option<SshConfi
         toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
     validate_ssh_config(&config)?;
     Ok(Some(config))
+}
+
+pub fn load_ssh_config_for_edit(project_root: &Path) -> Result<SshConfigFile> {
+    Ok(load_ssh_config_if_present(project_root)?.unwrap_or_default())
 }
 
 pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
@@ -306,6 +306,21 @@ pub fn write_manifest(project_root: &Path, manifest: &Manifest) -> Result<()> {
     let mut sorted = manifest.clone();
     sorted.sources.sort_by(|a, b| a.id.cmp(&b.id));
     let content = toml::to_string_pretty(&sorted)?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub fn write_ssh_config(project_root: &Path, config: &SshConfigFile) -> Result<()> {
+    validate_ssh_config(config)?;
+    let path = project_root.join("ply.ssh.toml");
+    if config.sources.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+
+    let content = toml::to_string_pretty(config)?;
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 

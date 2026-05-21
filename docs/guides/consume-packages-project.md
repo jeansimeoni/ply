@@ -85,6 +85,7 @@ Normal workflow:
 ```bash
 ply add --id local --path ./ply-packages/example-review
 ply add --id team --git owner/ply-team --rev main
+ply add --id team --git owner/ply-team --rev main --ssh
 ```
 
 The examples below show the equivalent manifest shape written into
@@ -134,6 +135,9 @@ rev = "v1.2.0"
 For Git sources that point at a local repo path, Ply currently supports
 `rev = "HEAD"` or no `rev`.
 
+If a Git source should use SSH transport, add it with `--ssh` or `--ssh-key`.
+Ply will create or update `ply.ssh.toml` automatically.
+
 To remove a source later:
 
 ```bash
@@ -177,6 +181,8 @@ To refresh Git source revisions without applying managed assets:
 ply update
 ply update team
 ```
+
+For the user-global root, the same commands support `--global` / `-g`.
 
 ## Verify the result
 
