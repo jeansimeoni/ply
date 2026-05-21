@@ -344,7 +344,7 @@ pub fn init_package(project_root: &Path, request: PackageInitRequest) -> Result<
 pub fn add_source(
     project_root: &Path,
     request: AddSourceRequest,
-    target: CommandTarget,
+    _target: CommandTarget,
 ) -> Result<SourceMutationReport> {
     let mut ssh_config = load_ssh_config_for_edit(project_root)?;
     let mut manifest = load_manifest_for_edit(project_root)?;
@@ -375,10 +375,28 @@ pub fn add_source(
         return Err(anyhow!("duplicate source id `{}`", source.id));
     }
 
+    update_ssh_config_for_added_source(&mut ssh_config, &request.id, &source, &request.ssh)?;
+
+    let mut resolved_git_revision = None;
+    if source.kind == "git" {
+        let ssh_entry = ssh_config.sources.get(&source.id);
+        let (_, revision) = git::clone_or_update_source(project_root, &source, ssh_entry)?;
+        resolved_git_revision = Some(revision);
+    }
+
     manifest.sources.push(source.clone());
     config::write_manifest(project_root, &manifest)?;
-    update_ssh_config_for_added_source(&mut ssh_config, &request.id, &source, &request.ssh)?;
     config::write_ssh_config(project_root, &ssh_config)?;
+    if let Some(revision) = resolved_git_revision.as_deref() {
+        upsert_lockfile_source(
+            project_root,
+            LockedSource {
+                id: source.id.clone(),
+                kind: source.kind.clone(),
+                resolved: revision.to_string(),
+            },
+        )?;
+    }
 
     let mut body = format!("Updated {}", project_root.join("ply.toml").display());
     body.push_str("\n\nAdded:");
@@ -391,21 +409,11 @@ pub fn add_source(
     }
 
     if source.kind == "git" {
-        let report = update_sources(
-            project_root,
-            UpdateSourcesRequest {
-                source_id: Some(source.id.clone()),
-            },
-            target,
-        )?;
         body.push_str("\n\nLockfile:");
         body.push('\n');
         body.push_str(&ui::list_item(
             "refreshed ply.lock for the added Git source and preserved other locked Git revisions when present",
         ));
-        body.push_str("\n\nUpdate summary:");
-        body.push('\n');
-        body.push_str(&report.body);
     }
 
     Ok(SourceMutationReport { body })
@@ -511,6 +519,23 @@ pub fn update_sources(
     }
 
     Ok(SourceMutationReport { body })
+}
+
+fn upsert_lockfile_source(project_root: &Path, source: LockedSource) -> Result<()> {
+    let mut lockfile = load_lockfile_if_present(project_root)?.unwrap_or(Lockfile {
+        schema_version: 1,
+        sources: Vec::new(),
+    });
+    if let Some(existing) = lockfile
+        .sources
+        .iter_mut()
+        .find(|entry| entry.id == source.id)
+    {
+        *existing = source;
+    } else {
+        lockfile.sources.push(source);
+    }
+    config::write_lockfile(project_root, &lockfile)
 }
 
 fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> Result<()> {
@@ -3751,6 +3776,43 @@ Use short, direct responses.
         )?;
 
         assert!(!temp.path().join("ply.ssh.toml").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_git_add_leaves_manifest_and_ssh_config_unchanged() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
+
+        let manifest_before = fs::read_to_string(temp.path().join("ply.toml"))?;
+        let ssh_exists_before = temp.path().join("ply.ssh.toml").exists();
+        let lock_exists_before = temp.path().join("ply.lock").exists();
+
+        let repo_root = temp.path().join("team-source");
+        init_git_package_repo(&repo_root, "team-source")?;
+
+        let err = add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-source".to_string(),
+                    rev: Some("main".to_string()),
+                },
+                ssh: AddSourceSshMode::KeyPath("~/.ssh/id_team".to_string()),
+            },
+            CommandTarget::Project,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not yet support rev `main`"));
+
+        let manifest_after = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert_eq!(manifest_before, manifest_after);
+        assert_eq!(
+            ssh_exists_before,
+            temp.path().join("ply.ssh.toml").exists()
+        );
+        assert_eq!(lock_exists_before, temp.path().join("ply.lock").exists());
         Ok(())
     }
 
