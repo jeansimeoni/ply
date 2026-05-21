@@ -551,6 +551,17 @@ fn upsert_lockfile_source(project_root: &Path, source: LockedSource) -> Result<(
     config::write_lockfile(project_root, &lockfile)
 }
 
+fn locked_source_matches_config(locked: &LockedSource, source: &SourceConfig) -> bool {
+    if locked.kind != source.kind {
+        return false;
+    }
+    match source.kind.as_str() {
+        "path" => locked.path == source.path,
+        "git" => locked.repo == source.repo.clone().or_else(|| source.url.clone()),
+        _ => false,
+    }
+}
+
 fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> Result<()> {
     if !target_root.exists() {
         return Ok(());
@@ -672,6 +683,7 @@ pub fn clean_project(project_root: &Path, options: CleanOptions) -> Result<Clean
 pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> {
     git::ensure_git_repo(project_root)?;
     let previous_state = load_state(project_root)?;
+    let previous_lock = load_lockfile_if_present(project_root)?;
     git::ensure_local_excludes(
         project_root,
         InitOptions {
@@ -681,7 +693,8 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
         },
     )?;
     let composition = compose_project_config(project_root)?;
-    let (sources, packages) = resolve_composed(&composition)?;
+    let (sources, packages) =
+        resolve_composed_for_apply(project_root, &composition, previous_lock)?;
     let planned_files = build_plan(
         project_root,
         &composition.adapters,
@@ -1249,6 +1262,12 @@ fn resolve_sources_for_update(
                             source.config.kind
                         ));
                     }
+                    if !locked_source_matches_config(previous, &source.config) {
+                        return Err(anyhow!(
+                            "cannot preserve locked revision for source `{}` because ply.lock recorded a different source locator; run `ply update` without a source id first",
+                            source.config.id
+                        ));
+                    }
                     ResolvedSource {
                         id: source.config.id.clone(),
                         kind: source.config.kind.clone(),
@@ -1321,14 +1340,41 @@ fn resolve_git_source(source: &MergedSource) -> Result<ResolvedSource> {
     })
 }
 
+fn resolve_locked_git_source(
+    source: &MergedSource,
+    locked: &LockedSource,
+) -> Result<ResolvedSource> {
+    let root = git::ensure_source_at_revision(
+        &source.root,
+        &source.config,
+        source.ssh_config.as_ref(),
+        &locked.resolved,
+    )?;
+    Ok(ResolvedSource {
+        id: source.config.id.clone(),
+        kind: source.config.kind.clone(),
+        resolved: locked.resolved.clone(),
+        root,
+        locator_path: None,
+        locator_repo: source
+            .config
+            .repo
+            .clone()
+            .or_else(|| source.config.url.clone()),
+        layer: source.layer,
+    })
+}
+
 fn git_source_root(project_root: &Path, source: &MergedSource) -> PathBuf {
     let _ = project_root;
-    source
-        .root
-        .join(".ply")
-        .join("cache")
-        .join("sources")
-        .join(&source.config.id)
+    git::source_checkout_root(&source.root, &source.config).unwrap_or_else(|_| {
+        source
+            .root
+            .join(".ply")
+            .join("cache")
+            .join("sources")
+            .join(&source.config.id)
+    })
 }
 
 fn resolve_composed(
@@ -1343,7 +1389,41 @@ fn resolve_composed(
         };
         sources.push(resolved);
     }
+    finalize_resolved_packages(sources)
+}
 
+fn resolve_composed_for_apply(
+    project_root: &Path,
+    config: &ComposedConfig,
+    previous_lock: Option<Lockfile>,
+) -> Result<(Vec<ResolvedSource>, Vec<ResolvedPackage>)> {
+    let previous_by_id = previous_lock
+        .unwrap_or_default()
+        .sources
+        .into_iter()
+        .map(|source| (source.id.clone(), source))
+        .collect::<BTreeMap<_, _>>();
+    let mut sources = Vec::new();
+    for source in &config.sources {
+        let resolved = match source.config.kind.as_str() {
+            "path" => resolve_path_source(source)?,
+            "git" => match previous_by_id.get(&source.config.id) {
+                Some(locked) if locked_source_matches_config(locked, &source.config) => {
+                    resolve_locked_git_source(source, locked)?
+                }
+                _ => resolve_git_source(source)?,
+            },
+            other => return Err(anyhow!("unsupported source kind `{other}`")),
+        };
+        sources.push(resolved);
+    }
+    let _ = project_root;
+    finalize_resolved_packages(sources)
+}
+
+fn finalize_resolved_packages(
+    sources: Vec<ResolvedSource>,
+) -> Result<(Vec<ResolvedSource>, Vec<ResolvedPackage>)> {
     let mut packages = Vec::new();
     for source in &sources {
         let package_root = source.root.clone();
@@ -3066,6 +3146,17 @@ mod tests {
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
+    fn git_head(path: &Path) -> Result<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("git rev-parse failed for {}", path.display()));
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    }
+
     #[test]
     fn merge_local_manifest_overrides_source_repo() -> Result<()> {
         let manifest = Manifest {
@@ -4085,6 +4176,7 @@ Use short, direct responses.
         assert!(manifest.contains("repo = \"./team-source\""));
         let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
         assert!(lockfile.contains("id = \"team\""));
+        assert!(lockfile.contains("repo = \"./team-source\""));
         assert!(lockfile.contains(&format!("resolved = \"{initial_commit}\"")));
 
         remove_source(
@@ -4180,14 +4272,14 @@ Use short, direct responses.
                 id: "team".to_string(),
                 location: AddSourceLocation::Git {
                     repo: "./team-source".to_string(),
-                    rev: Some("main".to_string()),
+                    rev: Some("missing-branch".to_string()),
                 },
                 ssh: AddSourceSshMode::KeyPath("~/.ssh/id_team".to_string()),
             },
             CommandTarget::Project,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("does not yet support rev `main`"));
+        assert!(!err.to_string().trim().is_empty());
 
         let manifest_after = fs::read_to_string(temp.path().join("ply.toml"))?;
         assert_eq!(manifest_before, manifest_after);
@@ -4254,6 +4346,86 @@ Use short, direct responses.
         let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
         assert!(lockfile.contains(&format!("resolved = \"{second_one}\"")));
         assert!(lockfile.contains(&format!("resolved = \"{first_two}\"")));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_reuses_locked_git_revision_until_update() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
+
+        let repo_root = temp.path().join("team-source");
+        let first_commit = init_git_package_repo(&repo_root, "team-source")?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-source".to_string(),
+                    rev: Some("HEAD".to_string()),
+                },
+                ssh: AddSourceSshMode::None,
+            },
+            CommandTarget::Project,
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let exposed_skill = temp
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("ply-review")
+            .join("SKILL.md");
+        let first_contents = fs::read_to_string(&exposed_skill)?;
+        let lock_before = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert!(lock_before.contains(&format!("resolved = \"{first_commit}\"")));
+
+        write(
+            &repo_root.join("skills").join("review").join("SKILL.md"),
+            "# review\n\nUpdated content.\n",
+        )?;
+        exec_in(&repo_root, &["add", "skills/review/SKILL.md"])?;
+        exec_in(&repo_root, &["commit", "-m", "update package"])?;
+        let second_commit = git_head(&repo_root)?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let lock_after_apply = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert_eq!(lock_before, lock_after_apply);
+        assert_eq!(fs::read_to_string(&exposed_skill)?, first_contents);
+
+        update_sources(
+            temp.path(),
+            UpdateSourcesRequest { source_id: None },
+            CommandTarget::Project,
+        )?;
+        let lock_after_update = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert!(lock_after_update.contains(&format!("resolved = \"{second_commit}\"")));
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        let updated_contents = fs::read_to_string(&exposed_skill)?;
+        assert!(updated_contents.contains("Updated content."));
         Ok(())
     }
 

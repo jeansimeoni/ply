@@ -1,9 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use std::ffi::OsStr;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::hash_map::DefaultHasher, fmt::Write as _};
 
 use crate::config::{InitOptions, SourceConfig, SshSourceConfig};
 use crate::ui;
@@ -170,52 +172,42 @@ pub fn clone_or_update_source(
     source: &SourceConfig,
     ssh_config: Option<&SshSourceConfig>,
 ) -> Result<(PathBuf, String)> {
+    let repo = source_repo(source)?;
+    let spec = resolve_repo_spec(project_root, repo)?;
+    let repo_path = source_checkout_root(project_root, source)?;
+    let remote = remote_from_repo_spec(&spec, ssh_config);
+
+    ensure_repo_cloned(project_root, source, &repo_path, &remote, ssh_config)?;
+    refresh_existing_repo(source, &repo_path, ssh_config)?;
+
+    let rev = source.rev.as_deref().unwrap_or("HEAD");
+    let resolved = resolve_checkout_revision(&repo_path, rev, ssh_command(ssh_config)?.as_deref())?;
+    checkout_revision(source, &repo_path, ssh_config, resolved.trim())?;
+    Ok((repo_path, resolved.trim().to_string()))
+}
+
+pub fn ensure_source_at_revision(
+    project_root: &Path,
+    source: &SourceConfig,
+    ssh_config: Option<&SshSourceConfig>,
+    revision: &str,
+) -> Result<PathBuf> {
+    let repo = source_repo(source)?;
+    let spec = resolve_repo_spec(project_root, repo)?;
+    let repo_path = source_checkout_root(project_root, source)?;
+    let remote = remote_from_repo_spec(&spec, ssh_config);
+
+    ensure_repo_cloned(project_root, source, &repo_path, &remote, ssh_config)?;
+    checkout_revision(source, &repo_path, ssh_config, revision)?;
+    Ok(repo_path)
+}
+
+pub fn source_checkout_root(project_root: &Path, source: &SourceConfig) -> Result<PathBuf> {
+    let repo = source_repo(source)?;
+    let identity = repo_identity(project_root, repo)?;
     let cache_root = project_root.join(".ply").join("cache").join("sources");
     fs::create_dir_all(&cache_root)?;
-    let repo_path = cache_root.join(&source.id);
-    let repo = source
-        .repo
-        .as_deref()
-        .or(source.url.as_deref())
-        .ok_or_else(|| anyhow!("git source `{}` missing repo", source.id))?;
-
-    match resolve_repo_spec(project_root, repo)? {
-        ResolvedRepoSpec::LocalPath(path) => {
-            if let Some(rev) = source.rev.as_deref() {
-                if rev != "HEAD" {
-                    return Err(anyhow!(
-                        "git source `{}` uses a local repo path and does not yet support rev `{}`; omit `rev` or use `HEAD`",
-                        source.id,
-                        rev
-                    ));
-                }
-            }
-            let progress =
-                ui::start_progress(&format!("Resolving local Git source `{}`", source.id));
-            let resolved = match run_git(&path, ["rev-parse", "HEAD"]) {
-                Ok(resolved) => {
-                    progress.success();
-                    resolved
-                }
-                Err(err) => {
-                    progress.error();
-                    return Err(err);
-                }
-            };
-            Ok((path, resolved.trim().to_string()))
-        }
-        ResolvedRepoSpec::GitHubShorthand(slug) => {
-            let remote = if ssh_config.map(|config| config.use_ssh).unwrap_or(false) {
-                format!("git@github.com:{slug}.git")
-            } else {
-                format!("https://github.com/{slug}")
-            };
-            clone_or_refresh_remote(project_root, source, &repo_path, &remote, ssh_config)
-        }
-        ResolvedRepoSpec::Remote(remote) => {
-            clone_or_refresh_remote(project_root, source, &repo_path, &remote, ssh_config)
-        }
-    }
+    Ok(cache_root.join(identity))
 }
 
 #[derive(Debug)]
@@ -223,6 +215,14 @@ enum ResolvedRepoSpec {
     LocalPath(PathBuf),
     GitHubShorthand(String),
     Remote(String),
+}
+
+fn source_repo(source: &SourceConfig) -> Result<&str> {
+    source
+        .repo
+        .as_deref()
+        .or(source.url.as_deref())
+        .ok_or_else(|| anyhow!("git source `{}` missing repo", source.id))
 }
 
 fn resolve_repo_spec(project_root: &Path, repo: &str) -> Result<ResolvedRepoSpec> {
@@ -258,82 +258,87 @@ fn resolve_repo_spec(project_root: &Path, repo: &str) -> Result<ResolvedRepoSpec
     Err(anyhow!("unsupported git repo spec `{repo}`"))
 }
 
-fn clone_or_refresh_remote(
+fn remote_from_repo_spec(spec: &ResolvedRepoSpec, ssh_config: Option<&SshSourceConfig>) -> String {
+    match spec {
+        ResolvedRepoSpec::LocalPath(path) => path.display().to_string(),
+        ResolvedRepoSpec::GitHubShorthand(slug) => {
+            if ssh_config.map(|config| config.use_ssh).unwrap_or(false) {
+                format!("git@github.com:{slug}.git")
+            } else {
+                format!("https://github.com/{slug}")
+            }
+        }
+        ResolvedRepoSpec::Remote(remote) => remote.clone(),
+    }
+}
+
+fn repo_identity(project_root: &Path, repo: &str) -> Result<String> {
+    let spec = resolve_repo_spec(project_root, repo)?;
+    let raw_identity = match spec {
+        ResolvedRepoSpec::LocalPath(path) => format!("local:{}", path.display()),
+        ResolvedRepoSpec::GitHubShorthand(slug) => format!("github:{slug}"),
+        ResolvedRepoSpec::Remote(remote) => format!("remote:{remote}"),
+    };
+    let mut hasher = DefaultHasher::new();
+    raw_identity.hash(&mut hasher);
+    let mut suffix = String::new();
+    let _ = write!(&mut suffix, "{:016x}", hasher.finish());
+    Ok(format!("source-{suffix}"))
+}
+
+fn ensure_repo_cloned(
     project_root: &Path,
     source: &SourceConfig,
     repo_path: &Path,
     remote: &str,
     ssh_config: Option<&SshSourceConfig>,
-) -> Result<(PathBuf, String)> {
-    let ssh_command = ssh_command(ssh_config)?;
-    if !repo_path.exists() {
-        let progress = ui::start_progress(&format!("Cloning Git source `{}`", source.id));
-        match run_git_args_with_env(
-            project_root,
-            ["clone", "--quiet", remote],
-            Some(repo_path.as_os_str()),
-            ssh_command.as_deref(),
-            "git clone",
-        ) {
-            Ok(()) => progress.success(),
-            Err(err) => {
-                progress.error();
-                return Err(err).with_context(|| format!("failed to clone source `{}`", source.id));
-            }
-        }
-    } else {
-        let progress = ui::start_progress(&format!("Fetching Git source `{}`", source.id));
-        match run_git_args_with_env(
-            repo_path,
-            ["fetch", "--all", "--tags", "--prune", "--quiet"],
-            None,
-            ssh_command.as_deref(),
-            "git fetch",
-        ) {
-            Ok(()) => progress.success(),
-            Err(err) => {
-                progress.error();
-                return Err(err)
-                    .with_context(|| format!("failed to refresh source `{}`", source.id));
-            }
-        }
+) -> Result<()> {
+    if repo_path.exists() {
+        return Ok(());
     }
-
-    let rev = source.rev.as_deref().unwrap_or("HEAD");
-    let resolved = resolve_checkout_revision(repo_path, rev, ssh_command.as_deref())?;
-    let progress = ui::start_progress(&format!(
-        "Checking out Git source `{}` at {}",
-        source.id,
-        resolved.trim()
-    ));
+    let ssh_command = ssh_command(ssh_config)?;
+    let progress = ui::start_progress(&format!("Cloning Git source `{}`", source.id));
     match run_git_args_with_env(
-        repo_path,
-        [
-            "-c",
-            "advice.detachedHead=false",
-            "checkout",
-            "--quiet",
-            "--force",
-            resolved.trim(),
-        ],
-        None,
+        project_root,
+        ["clone", "--quiet", remote],
+        Some(repo_path.as_os_str()),
         ssh_command.as_deref(),
-        "git checkout",
+        "git clone",
     ) {
-        Ok(()) => progress.success(),
+        Ok(()) => {
+            progress.success();
+            Ok(())
+        }
         Err(err) => {
             progress.error();
-            return Err(err).with_context(|| {
-                format!(
-                    "failed to checkout revision `{}` for source `{}`",
-                    resolved.trim(),
-                    source.id
-                )
-            });
+            Err(err).with_context(|| format!("failed to clone source `{}`", source.id))
         }
     }
+}
 
-    Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
+fn refresh_existing_repo(
+    source: &SourceConfig,
+    repo_path: &Path,
+    ssh_config: Option<&SshSourceConfig>,
+) -> Result<()> {
+    let ssh_command = ssh_command(ssh_config)?;
+    let progress = ui::start_progress(&format!("Fetching Git source `{}`", source.id));
+    match run_git_args_with_env(
+        repo_path,
+        ["fetch", "--all", "--tags", "--prune", "--quiet"],
+        None,
+        ssh_command.as_deref(),
+        "git fetch",
+    ) {
+        Ok(()) => {
+            progress.success();
+            Ok(())
+        }
+        Err(err) => {
+            progress.error();
+            Err(err).with_context(|| format!("failed to refresh source `{}`", source.id))
+        }
+    }
 }
 
 fn resolve_checkout_revision(
@@ -341,6 +346,15 @@ fn resolve_checkout_revision(
     rev: &str,
     ssh_command: Option<&str>,
 ) -> Result<String> {
+    if rev == "HEAD" {
+        if let Ok(resolved) = run_git_with_env(
+            repo_path,
+            ["rev-parse", "--verify", "refs/remotes/origin/HEAD"],
+            ssh_command,
+        ) {
+            return Ok(resolved);
+        }
+    }
     if rev != "HEAD" {
         let remote_ref = format!("refs/remotes/origin/{rev}");
         if let Ok(resolved) = run_git_with_env(
@@ -352,6 +366,47 @@ fn resolve_checkout_revision(
         }
     }
     run_git_with_env(repo_path, ["rev-parse", rev], ssh_command)
+}
+
+fn checkout_revision(
+    source: &SourceConfig,
+    repo_path: &Path,
+    ssh_config: Option<&SshSourceConfig>,
+    revision: &str,
+) -> Result<()> {
+    let ssh_command = ssh_command(ssh_config)?;
+    let progress = ui::start_progress(&format!(
+        "Checking out Git source `{}` at {}",
+        source.id, revision
+    ));
+    match run_git_args_with_env(
+        repo_path,
+        [
+            "-c",
+            "advice.detachedHead=false",
+            "checkout",
+            "--quiet",
+            "--force",
+            revision,
+        ],
+        None,
+        ssh_command.as_deref(),
+        "git checkout",
+    ) {
+        Ok(()) => {
+            progress.success();
+            Ok(())
+        }
+        Err(err) => {
+            progress.error();
+            Err(err).with_context(|| {
+                format!(
+                    "failed to checkout revision `{}` for source `{}`",
+                    revision, source.id
+                )
+            })
+        }
+    }
 }
 
 fn ssh_command(ssh_config: Option<&SshSourceConfig>) -> Result<Option<String>> {
@@ -512,6 +567,33 @@ mod tests {
         run_git(&worktree, ["push", "origin", "master"])?;
         let (_, resolved_second) = clone_or_update_source(temp.path(), &source, None)?;
         assert_eq!(resolved_second, second);
+        Ok(())
+    }
+
+    #[test]
+    fn source_checkout_root_is_stable_across_source_id_renames() -> Result<()> {
+        let temp = TempDir::new()?;
+        let first = SourceConfig {
+            id: "one".to_string(),
+            kind: "git".to_string(),
+            path: None,
+            repo: Some("owner/repo".to_string()),
+            url: None,
+            rev: Some("HEAD".to_string()),
+        };
+        let second = SourceConfig {
+            id: "two".to_string(),
+            kind: "git".to_string(),
+            path: None,
+            repo: Some("owner/repo".to_string()),
+            url: None,
+            rev: Some("HEAD".to_string()),
+        };
+
+        assert_eq!(
+            source_checkout_root(temp.path(), &first)?,
+            source_checkout_root(temp.path(), &second)?,
+        );
         Ok(())
     }
 }
