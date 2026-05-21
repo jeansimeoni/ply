@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -104,6 +105,10 @@ pub struct Lockfile {
 pub struct LockedSource {
     pub id: String,
     pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
     pub resolved: String,
 }
 
@@ -148,6 +153,10 @@ pub struct PackageManifest {
     pub version: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -410,9 +419,24 @@ pub fn load_package_manifest(package_root: &Path) -> Result<PackageManifest> {
     let path = package_root.join("ply-package.toml");
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let manifest =
+    let manifest: PackageManifest =
         toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_package_manifest(&manifest)?;
     Ok(manifest)
+}
+
+pub fn validate_package_manifest(manifest: &PackageManifest) -> Result<()> {
+    if manifest.name.trim().is_empty() {
+        return Err(anyhow!("package name cannot be empty"));
+    }
+    if let Some(version) = manifest.version.as_deref() {
+        Version::parse(version)
+            .with_context(|| format!("package version `{version}` is not valid semver"))?;
+    }
+    for target in &manifest.targets {
+        AdapterKind::parse(target)?;
+    }
+    Ok(())
 }
 
 pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
@@ -764,5 +788,33 @@ path = ".ply/overlays/codex/skills"
             err.to_string()
                 .contains("both `ssh_key_path` and `ssh_key_env`")
         );
+    }
+
+    #[test]
+    fn reject_invalid_package_semver() {
+        let manifest = PackageManifest {
+            name: "review-tools".to_string(),
+            version: Some("not-semver".to_string()),
+            description: None,
+            license: None,
+            targets: Vec::new(),
+        };
+
+        let err = validate_package_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("not valid semver"));
+    }
+
+    #[test]
+    fn reject_unknown_package_target() {
+        let manifest = PackageManifest {
+            name: "review-tools".to_string(),
+            version: None,
+            description: None,
+            license: None,
+            targets: vec!["cursor".to_string()],
+        };
+
+        let err = validate_package_manifest(&manifest).unwrap_err();
+        assert!(err.to_string().contains("unsupported adapter `cursor`"));
     }
 }

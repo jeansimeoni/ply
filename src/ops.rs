@@ -72,6 +72,8 @@ struct ResolvedSource {
     kind: String,
     root: PathBuf,
     resolved: String,
+    locator_path: Option<String>,
+    locator_repo: Option<String>,
     layer: LayerKind,
 }
 
@@ -400,6 +402,8 @@ pub fn add_source(
             LockedSource {
                 id: source.id.clone(),
                 kind: source.kind.clone(),
+                path: source.path.clone(),
+                repo: source.repo.clone(),
                 resolved: revision.to_string(),
             },
         )?;
@@ -508,6 +512,8 @@ pub fn update_sources(
             .map(|source| LockedSource {
                 id: source.id.clone(),
                 kind: source.kind.clone(),
+                path: source.locator_path.clone(),
+                repo: source.locator_repo.clone(),
                 resolved: source.resolved.clone(),
             })
             .collect(),
@@ -711,6 +717,8 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
             .map(|source| LockedSource {
                 id: source.id.clone(),
                 kind: source.kind.clone(),
+                path: source.locator_path.clone(),
+                repo: source.locator_repo.clone(),
                 resolved: source.resolved.clone(),
             })
             .collect(),
@@ -1246,6 +1254,12 @@ fn resolve_sources_for_update(
                         kind: source.config.kind.clone(),
                         resolved: previous.resolved.clone(),
                         root: git_source_root(project_root, source),
+                        locator_path: None,
+                        locator_repo: source
+                            .config
+                            .repo
+                            .clone()
+                            .or_else(|| source.config.url.clone()),
                         layer: source.layer,
                     }
                 }
@@ -1283,6 +1297,8 @@ fn resolve_path_source(source: &MergedSource) -> Result<ResolvedSource> {
         kind: source.config.kind.clone(),
         resolved: root.display().to_string(),
         root,
+        locator_path: source.config.path.clone(),
+        locator_repo: None,
         layer: source.layer,
     })
 }
@@ -1295,6 +1311,12 @@ fn resolve_git_source(source: &MergedSource) -> Result<ResolvedSource> {
         kind: source.config.kind.clone(),
         resolved: revision,
         root,
+        locator_path: None,
+        locator_repo: source
+            .config
+            .repo
+            .clone()
+            .or_else(|| source.config.url.clone()),
         layer: source.layer,
     })
 }
@@ -1332,12 +1354,27 @@ fn resolve_composed(
             ));
         }
         let manifest = load_package_manifest(&package_root)?;
+        validate_package_root(&package_root, &manifest)?;
         packages.push(ResolvedPackage {
             source_id: source.id.clone(),
             source_layer: source.layer,
             root: package_root,
             manifest,
         });
+    }
+
+    let mut package_names = BTreeMap::new();
+    for package in &packages {
+        if let Some(existing_source) =
+            package_names.insert(package.manifest.name.clone(), package.source_id.clone())
+        {
+            return Err(anyhow!(
+                "duplicate package name `{}` from sources `{}` and `{}`",
+                package.manifest.name,
+                existing_source,
+                package.source_id
+            ));
+        }
     }
 
     Ok((sources, packages))
@@ -1356,6 +1393,9 @@ fn build_plan(
     for adapter_name in adapter_names {
         let adapter = AdapterKind::parse(adapter_name)?;
         for package in packages {
+            if !package_targets_adapter(&package.manifest, adapter)? {
+                continue;
+            }
             for kind in [
                 AssetKind::Commands,
                 AssetKind::Skills,
@@ -1884,17 +1924,13 @@ fn collect_prompt_directory_plan(
                 .join("agents")
                 .join(format!("{managed_name}.toml"));
             if let Some(index) = seen.get(&generated_relative_path).copied() {
-                plan[index] = PlannedFile {
-                    adapter: AdapterKind::Codex,
-                    kind: AssetKind::Agents,
-                    exposure_mode: ExposureMode::GeneratedComposite,
-                    relative_name: managed_name,
-                    generated_relative_path,
-                    exposed_relative_path,
-                    contents: rendered.into_bytes(),
-                    origin_layer,
-                    origin_detail,
-                };
+                let existing = &plan[index];
+                return Err(anyhow!(
+                    "duplicate managed asset target {} from {} and {}",
+                    existing.exposed_relative_path.display(),
+                    existing.origin_detail,
+                    origin_detail
+                ));
             } else {
                 let index = plan.len();
                 seen.insert(generated_relative_path.clone(), index);
@@ -1990,17 +2026,13 @@ fn push_rendered_file(
         .join(&relative_path_within_kind);
 
     if let Some(index) = seen.get(&generated_relative_path).copied() {
-        plan[index] = PlannedFile {
-            adapter,
-            kind,
-            exposure_mode,
-            relative_name,
-            generated_relative_path,
-            exposed_relative_path,
-            contents,
-            origin_layer,
-            origin_detail,
-        };
+        let existing = &plan[index];
+        return Err(anyhow!(
+            "duplicate managed asset target {} from {} and {}",
+            existing.exposed_relative_path.display(),
+            existing.origin_detail,
+            origin_detail
+        ));
     } else {
         let index = plan.len();
         seen.insert(generated_relative_path.clone(), index);
@@ -2081,17 +2113,13 @@ fn collect_planned_files(
         let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(&managed_rel);
 
         if let Some(index) = seen.get(&generated_relative_path).copied() {
-            plan[index] = PlannedFile {
-                adapter,
-                kind,
-                exposure_mode: ExposureMode::Direct,
-                relative_name: managed_name,
-                generated_relative_path,
-                exposed_relative_path,
-                contents: fs::read(&file)?,
-                origin_layer,
-                origin_detail: origin_detail.clone(),
-            };
+            let existing = &plan[index];
+            return Err(anyhow!(
+                "duplicate managed asset target {} from {} and {}",
+                existing.exposed_relative_path.display(),
+                existing.origin_detail,
+                origin_detail
+            ));
         } else {
             let index = plan.len();
             seen.insert(generated_relative_path.clone(), index);
@@ -2734,6 +2762,167 @@ fn resource_targets_adapter(
         .any(|target| target == adapter.as_str()))
 }
 
+fn package_targets_adapter(manifest: &PackageManifest, adapter: AdapterKind) -> Result<bool> {
+    if manifest.targets.is_empty() {
+        return Ok(true);
+    }
+    for target in &manifest.targets {
+        AdapterKind::parse(target)?;
+    }
+    Ok(manifest
+        .targets
+        .iter()
+        .any(|target| target == adapter.as_str()))
+}
+
+fn validate_package_root(package_root: &Path, manifest: &PackageManifest) -> Result<()> {
+    let mut managed_asset_roots = 0usize;
+    for entry in fs::read_dir(package_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "ply-package.toml" || is_asset_metadata_file(&path) {
+            continue;
+        }
+        if matches!(
+            name.as_str(),
+            ".claude" | ".agents" | ".codex" | ".cursor" | ".gemini"
+        ) {
+            return Err(anyhow!(
+                "package `{}` contains unsupported adapter directory `{}`; use portable package asset kinds instead",
+                manifest.name,
+                name
+            ));
+        }
+        if name == "local-instructions.md" {
+            if !entry.file_type()?.is_file() {
+                return Err(anyhow!(
+                    "package `{}` must provide `local-instructions.md` as a file",
+                    manifest.name
+                ));
+            }
+            managed_asset_roots += 1;
+            let metadata = load_document_metadata(&path)?;
+            validate_package_metadata_targets(manifest, metadata.as_ref(), &path)?;
+            continue;
+        }
+
+        let Ok(kind) = AssetKind::parse(&name) else {
+            continue;
+        };
+        if !entry.file_type()?.is_dir() {
+            return Err(anyhow!(
+                "package `{}` asset kind `{}` must be a directory",
+                manifest.name,
+                kind.as_str()
+            ));
+        }
+        managed_asset_roots += 1;
+        validate_asset_kind_layout(&path, kind, manifest)?;
+    }
+
+    if managed_asset_roots == 0 {
+        return Err(anyhow!(
+            "package `{}` does not expose any supported managed assets",
+            manifest.name
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_asset_kind_layout(
+    asset_root: &Path,
+    kind: AssetKind,
+    manifest: &PackageManifest,
+) -> Result<()> {
+    match kind {
+        AssetKind::Commands | AssetKind::OutputStyles => {
+            for entry in fs::read_dir(asset_root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if is_asset_metadata_file(&path) {
+                    continue;
+                }
+                if !entry.file_type()?.is_file() {
+                    return Err(anyhow!(
+                        "package `{}` asset kind `{}` expects files directly under `{}`",
+                        manifest.name,
+                        kind.as_str(),
+                        asset_root.display()
+                    ));
+                }
+                let metadata = load_document_metadata(&path)?;
+                validate_package_metadata_targets(manifest, metadata.as_ref(), &path)?;
+            }
+        }
+        AssetKind::Skills | AssetKind::Agents => {
+            for entry in fs::read_dir(asset_root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !entry.file_type()?.is_dir() {
+                    return Err(anyhow!(
+                        "package `{}` asset kind `{}` expects directories directly under `{}`",
+                        manifest.name,
+                        kind.as_str(),
+                        asset_root.display()
+                    ));
+                }
+                let resource_name = entry.file_name().to_string_lossy().to_string();
+                let metadata = load_resource_metadata(asset_root, &resource_name)?;
+                validate_package_metadata_targets(manifest, metadata.as_ref(), &path)?;
+            }
+        }
+        AssetKind::Rules | AssetKind::Hooks => {
+            let _ = collect_file_paths(asset_root)?;
+            let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> =
+                BTreeMap::new();
+            for file in collect_file_paths(asset_root)? {
+                let rel = file.strip_prefix(asset_root)?;
+                let top_level_name = rel
+                    .components()
+                    .next()
+                    .ok_or_else(|| anyhow!("empty relative path under {}", asset_root.display()))?
+                    .as_os_str()
+                    .to_string_lossy()
+                    .to_string();
+                let metadata = metadata_cache
+                    .entry(top_level_name.clone())
+                    .or_insert_with(|| load_resource_metadata(asset_root, &top_level_name))
+                    .as_ref()
+                    .map_err(|err| anyhow!(err.to_string()))?;
+                validate_package_metadata_targets(manifest, metadata.as_ref(), &file)?;
+            }
+        }
+        AssetKind::LocalInstructions => {}
+    }
+    Ok(())
+}
+
+fn validate_package_metadata_targets(
+    manifest: &PackageManifest,
+    metadata: Option<&AssetMetadata>,
+    resource_path: &Path,
+) -> Result<()> {
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    for target in &metadata.targets {
+        AdapterKind::parse(target)?;
+        if !manifest.targets.is_empty() && !manifest.targets.iter().any(|allowed| allowed == target)
+        {
+            return Err(anyhow!(
+                "resource `{}` targets `{}` but package `{}` only allows [{}]",
+                resource_path.display(),
+                target,
+                manifest.name,
+                manifest.targets.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn merge_local_manifest(
     mut manifest: Manifest,
     local_manifest: Option<LocalManifest>,
@@ -3237,6 +3426,190 @@ mod tests {
 
         let claude_local = fs::read_to_string(temp.path().join("CLAUDE.local.md"))?;
         assert!(claude_local.contains("Shared local instruction."));
+        Ok(())
+    }
+
+    #[test]
+    fn package_targets_can_limit_generation() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), true)?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &package_root.join("ply-package.toml"),
+            "name = \"review-diff\"\ntargets = [\"claude\"]\n",
+        )?;
+
+        apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+
+        assert!(
+            !temp
+                .path()
+                .join(".agents")
+                .join("skills")
+                .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-review-diff")
+                .join("SKILL.md")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reject_resource_target_outside_package_targets() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), true)?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &package_root.join("ply-package.toml"),
+            "name = \"review-diff\"\ntargets = [\"claude\"]\n",
+        )?;
+        write(
+            &package_root
+                .join("skills")
+                .join("review-diff")
+                .join("ply-asset.toml"),
+            "targets = [\"codex\"]\n",
+        )?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("only allows [claude]"));
+        Ok(())
+    }
+
+    #[test]
+    fn reject_package_with_unsupported_adapter_directory() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), true)?;
+        let package_root = example_package_root(temp.path());
+        fs::create_dir_all(package_root.join(".claude"))?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported adapter directory `.claude`")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reject_duplicate_package_names_across_sources() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
+        let first = temp.path().join("pkg-one");
+        let second = temp.path().join("pkg-two");
+        fs::create_dir_all(first.join("skills").join("one"))?;
+        fs::create_dir_all(second.join("skills").join("two"))?;
+        write(&first.join("ply-package.toml"), "name = \"shared\"\n")?;
+        write(&second.join("ply-package.toml"), "name = \"shared\"\n")?;
+        write(
+            &first.join("skills").join("one").join("SKILL.md"),
+            "# one\n",
+        )?;
+        write(
+            &second.join("skills").join("two").join("SKILL.md"),
+            "# two\n",
+        )?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "one".to_string(),
+                location: AddSourceLocation::Path("./pkg-one".to_string()),
+                ssh: AddSourceSshMode::None,
+            },
+            CommandTarget::Project,
+        )?;
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "two".to_string(),
+                location: AddSourceLocation::Path("./pkg-two".to_string()),
+                ssh: AddSourceSshMode::None,
+            },
+            CommandTarget::Project,
+        )?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate package name `shared`"));
+        Ok(())
+    }
+
+    #[test]
+    fn reject_duplicate_managed_asset_targets_across_sources() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), false)?;
+        let first = temp.path().join("pkg-one");
+        let second = temp.path().join("pkg-two");
+        fs::create_dir_all(first.join("commands"))?;
+        fs::create_dir_all(second.join("commands"))?;
+        write(&first.join("ply-package.toml"), "name = \"one\"\n")?;
+        write(&second.join("ply-package.toml"), "name = \"two\"\n")?;
+        write(&first.join("commands").join("review.md"), "Review one.\n")?;
+        write(&second.join("commands").join("review.md"), "Review two.\n")?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "one".to_string(),
+                location: AddSourceLocation::Path("./pkg-one".to_string()),
+                ssh: AddSourceSshMode::None,
+            },
+            CommandTarget::Project,
+        )?;
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "two".to_string(),
+                location: AddSourceLocation::Path("./pkg-two".to_string()),
+                ssh: AddSourceSshMode::None,
+            },
+            CommandTarget::Project,
+        )?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate managed asset target"));
+        assert!(err.to_string().contains(".agents/commands/ply-review.md"));
         Ok(())
     }
 
