@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{InitOptions, SourceConfig, SshSourceConfig};
+use crate::ui;
 
 const PLY_EXCLUDE_START: &str = "# ply:start";
 const PLY_EXCLUDE_END: &str = "# ply:end";
@@ -189,7 +190,18 @@ pub fn clone_or_update_source(
                     ));
                 }
             }
-            let resolved = run_git(&path, ["rev-parse", "HEAD"])?;
+            let progress =
+                ui::start_progress(&format!("Resolving local Git source `{}`", source.id));
+            let resolved = match run_git(&path, ["rev-parse", "HEAD"]) {
+                Ok(resolved) => {
+                    progress.success();
+                    resolved
+                }
+                Err(err) => {
+                    progress.error();
+                    return Err(err);
+                }
+            };
             Ok((path, resolved.trim().to_string()))
         }
         ResolvedRepoSpec::GitHubShorthand(slug) => {
@@ -255,28 +267,46 @@ fn clone_or_refresh_remote(
 ) -> Result<(PathBuf, String)> {
     let ssh_command = ssh_command(ssh_config)?;
     if !repo_path.exists() {
-        run_git_args_with_env(
+        let progress = ui::start_progress(&format!("Cloning Git source `{}`", source.id));
+        match run_git_args_with_env(
             project_root,
             ["clone", "--quiet", remote],
             Some(repo_path.as_os_str()),
             ssh_command.as_deref(),
             "git clone",
-        )
-        .with_context(|| format!("failed to clone source `{}`", source.id))?;
+        ) {
+            Ok(()) => progress.success(),
+            Err(err) => {
+                progress.error();
+                return Err(err).with_context(|| format!("failed to clone source `{}`", source.id));
+            }
+        }
     } else {
-        run_git_args_with_env(
+        let progress = ui::start_progress(&format!("Fetching Git source `{}`", source.id));
+        match run_git_args_with_env(
             repo_path,
             ["fetch", "--all", "--tags", "--prune", "--quiet"],
             None,
             ssh_command.as_deref(),
             "git fetch",
-        )
-        .with_context(|| format!("failed to refresh source `{}`", source.id))?;
+        ) {
+            Ok(()) => progress.success(),
+            Err(err) => {
+                progress.error();
+                return Err(err)
+                    .with_context(|| format!("failed to refresh source `{}`", source.id));
+            }
+        }
     }
 
     let rev = source.rev.as_deref().unwrap_or("HEAD");
     let resolved = resolve_checkout_revision(repo_path, rev, ssh_command.as_deref())?;
-    run_git_args_with_env(
+    let progress = ui::start_progress(&format!(
+        "Checking out Git source `{}` at {}",
+        source.id,
+        resolved.trim()
+    ));
+    match run_git_args_with_env(
         repo_path,
         [
             "-c",
@@ -289,14 +319,19 @@ fn clone_or_refresh_remote(
         None,
         ssh_command.as_deref(),
         "git checkout",
-    )
-    .with_context(|| {
-        format!(
-            "failed to checkout revision `{}` for source `{}`",
-            resolved.trim(),
-            source.id
-        )
-    })?;
+    ) {
+        Ok(()) => progress.success(),
+        Err(err) => {
+            progress.error();
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to checkout revision `{}` for source `{}`",
+                    resolved.trim(),
+                    source.id
+                )
+            });
+        }
+    }
 
     Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
 }
