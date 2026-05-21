@@ -43,6 +43,7 @@ Useful options:
 
 - `--with-packages` creates the example local package source explicitly.
 - `--without-packages` skips the example local package source.
+- `--adapters codex` or `--adapters claude` limits the initial manifest to one adapter.
 - `--ignore-config` keeps Ply config ignored locally in this clone. This is
   the default.
 - `--track-config` leaves `ply.toml`, `ply.lock`, and `ply-packages/`

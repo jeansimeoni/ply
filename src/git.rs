@@ -412,6 +412,7 @@ mod tests {
             InitOptions {
                 scaffold_local_packages: false,
                 ignore_config: false,
+                adapters: &["codex", "claude"],
             },
         )?;
 
@@ -432,6 +433,7 @@ mod tests {
             InitOptions {
                 scaffold_local_packages: false,
                 ignore_config: true,
+                adapters: &["codex", "claude"],
             },
         )?;
 

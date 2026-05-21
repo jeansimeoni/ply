@@ -29,7 +29,7 @@ rev = "main"
 Important fields:
 
 - `schema_version`: only `1` is supported
-- `adapters`: defaults to `["codex", "claude"]`
+- `adapters`: defaults to `["codex", "claude"]`, or whatever subset was chosen during `ply init --adapters`
 - `[install].mode`: only `"copy"` is implemented
 - `[install].use_global`: defaults to `true`
 - `[[sources]]`: the package roots to consume

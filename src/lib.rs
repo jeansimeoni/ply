@@ -86,6 +86,11 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             } else {
                 "Ply config remains trackable"
             }));
+            body.push('\n');
+            body.push_str(&ui::list_item(&format!(
+                "enable adapters: {}",
+                report.adapters.join(", ")
+            )));
             let title = if report.dry_run {
                 "Init dry-run"
             } else {
@@ -347,6 +352,12 @@ enum HelpTopic {
     Clean,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum InitAdapter {
+    Codex,
+    Claude,
+}
+
 #[derive(Debug, Clone, Args, Default)]
 struct InitCli {
     #[arg(long = "with-packages", conflicts_with = "without_packages")]
@@ -357,6 +368,8 @@ struct InitCli {
     ignore_config: bool,
     #[arg(long = "track-config")]
     track_config: bool,
+    #[arg(long, value_delimiter = ',')]
+    adapters: Vec<InitAdapter>,
     #[arg(long, short = 'y')]
     yes: bool,
     #[arg(long, short = 'g')]
@@ -474,10 +487,13 @@ impl InitCli {
             .map_err(|err| anyhow!("failed to read init option: {err}"))?
         };
 
+        let adapters = init_adapters(&self.adapters)?;
+
         Ok(InitRequest {
             options: InitOptions {
                 scaffold_local_packages,
                 ignore_config,
+                adapters,
             },
             dry_run: self.dry_run,
             target: if self.global {
@@ -487,6 +503,22 @@ impl InitCli {
             },
         })
     }
+}
+
+fn init_adapters(selected: &[InitAdapter]) -> Result<&'static [&'static str]> {
+    let has_codex = selected
+        .iter()
+        .any(|adapter| matches!(adapter, InitAdapter::Codex));
+    let has_claude = selected
+        .iter()
+        .any(|adapter| matches!(adapter, InitAdapter::Claude));
+
+    Ok(match (has_codex, has_claude) {
+        (false, false) => &["codex", "claude"],
+        (true, false) => &["codex"],
+        (false, true) => &["claude"],
+        (true, true) => &["codex", "claude"],
+    })
 }
 
 impl InitPackageCli {
@@ -694,6 +726,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_init_adapters_flag() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "init".to_string(),
+            "--adapters".to_string(),
+            "claude".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Init(options) => {
+                assert_eq!(options.options.adapters, vec![InitAdapter::Claude]);
+            }
+            other => panic!("expected init command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parse_init_package_flags() -> Result<()> {
         let cli = Cli::parse(vec![
             "init".to_string(),
@@ -755,6 +804,7 @@ mod tests {
             without_packages: true,
             ignore_config: false,
             track_config: false,
+            adapters: Vec::new(),
             yes: true,
             global: false,
             dry_run: false,
@@ -762,6 +812,24 @@ mod tests {
         .resolve()?;
 
         assert!(request.options.ignore_config);
+        Ok(())
+    }
+
+    #[test]
+    fn init_adapters_can_be_scoped_to_claude() -> Result<()> {
+        let request = InitCli {
+            with_packages: false,
+            without_packages: true,
+            ignore_config: false,
+            track_config: false,
+            adapters: vec![InitAdapter::Claude],
+            yes: true,
+            global: false,
+            dry_run: false,
+        }
+        .resolve()?;
+
+        assert_eq!(request.options.adapters, &["claude"]);
         Ok(())
     }
 

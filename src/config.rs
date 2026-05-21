@@ -123,6 +123,7 @@ pub struct State {
 pub struct InitOptions {
     pub scaffold_local_packages: bool,
     pub ignore_config: bool,
+    pub adapters: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,7 +341,11 @@ pub fn write_default_manifest(project_root: &Path, options: InitOptions) -> Resu
     let mut manifest = Manifest {
         schema_version: 1,
         install: InstallConfig::default(),
-        adapters: default_adapters(),
+        adapters: options
+            .adapters
+            .iter()
+            .map(|adapter| adapter.to_string())
+            .collect(),
         sources: Vec::new(),
     };
     if options.scaffold_local_packages {
@@ -699,6 +704,25 @@ path = ".ply/overlays/codex/skills"
         assert!(written.contains("[[overlays]]"));
         assert!(written.contains("adapter = \"claude\""));
         assert!(written.contains("path = \".ply/overlays/claude/skills\""));
+        Ok(())
+    }
+
+    #[test]
+    fn write_default_manifest_respects_selected_adapters() -> Result<()> {
+        let temp = TempDir::new()?;
+
+        write_default_manifest(
+            temp.path(),
+            InitOptions {
+                scaffold_local_packages: false,
+                ignore_config: false,
+                adapters: &["claude"],
+            },
+        )?;
+
+        let written = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert!(written.contains("adapters = [\"claude\"]"));
+        assert!(!written.contains("\"codex\""));
         Ok(())
     }
 

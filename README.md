@@ -26,6 +26,9 @@ User and package-author docs live under [`docs/`](docs/).
 Current docs assume the `ply` binary is already available in your shell.
 End-user installation instructions are not documented yet.
 
+If you only want one runtime in a new root, initialize with
+`ply init --adapters codex` or `ply init --adapters claude`.
+
 ## Development
 
 This repository uses [`mise`](https://mise.jdx.dev/) to pin the Rust toolchain.

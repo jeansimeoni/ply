@@ -24,6 +24,7 @@ Options:
 
 - `--with-packages`
 - `--without-packages`
+- `--adapters <list>`
 - `--ignore-config`
 - `--track-config`
 - `--global`, `-g`
@@ -32,6 +33,11 @@ Options:
 
 Use `ply init` for consumer setup. Use `ply init package` for authoring a
 package root.
+
+Notes:
+
+- `--adapters` accepts a comma-separated subset of `codex,claude`
+- if omitted, Ply initializes the manifest with both adapters enabled
 
 ## `ply init package`
 

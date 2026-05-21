@@ -191,6 +191,7 @@ pub struct InitReport {
     pub created_manifest: bool,
     pub created_local_fixture: bool,
     pub ignore_config: bool,
+    pub adapters: Vec<String>,
     pub target_root: PathBuf,
     pub dry_run: bool,
 }
@@ -303,6 +304,12 @@ pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitRep
         created_manifest,
         created_local_fixture,
         ignore_config: request.options.ignore_config,
+        adapters: request
+            .options
+            .adapters
+            .iter()
+            .map(|adapter| adapter.to_string())
+            .collect(),
         target_root,
         dry_run: request.dry_run,
     })
@@ -664,6 +671,7 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
         InitOptions {
             scaffold_local_packages: false,
             ignore_config: previous_state.ignore_config,
+            adapters: &["codex", "claude"],
         },
     )?;
     let composition = compose_project_config(project_root)?;
@@ -2832,6 +2840,7 @@ mod tests {
                 options: InitOptions {
                     scaffold_local_packages,
                     ignore_config: false,
+                    adapters: &["codex", "claude"],
                 },
                 dry_run: false,
                 target: CommandTarget::Project,
@@ -2914,6 +2923,7 @@ mod tests {
                 options: InitOptions {
                     scaffold_local_packages: true,
                     ignore_config: false,
+                    adapters: &["codex", "claude"],
                 },
                 dry_run: false,
                 target: CommandTarget::Project,
