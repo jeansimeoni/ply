@@ -255,46 +255,48 @@ fn clone_or_refresh_remote(
 ) -> Result<(PathBuf, String)> {
     let ssh_command = ssh_command(ssh_config)?;
     if !repo_path.exists() {
-        let mut command = Command::new("git");
-        command
-            .args(["clone", remote])
-            .arg(repo_path)
-            .current_dir(project_root);
-        if let Some(ssh_command) = &ssh_command {
-            command.env("GIT_SSH_COMMAND", ssh_command);
-        }
-        let status = command.status().context("failed to run `git clone`")?;
-        if !status.success() {
-            return Err(anyhow!("git clone failed for source `{}`", source.id));
-        }
+        run_git_args_with_env(
+            project_root,
+            ["clone", "--quiet", remote],
+            Some(repo_path.as_os_str()),
+            ssh_command.as_deref(),
+            "git clone",
+        )
+        .with_context(|| format!("failed to clone source `{}`", source.id))?;
     } else {
-        let mut command = Command::new("git");
-        command
-            .args(["fetch", "--all", "--tags", "--prune"])
-            .current_dir(repo_path);
-        if let Some(ssh_command) = &ssh_command {
-            command.env("GIT_SSH_COMMAND", ssh_command);
-        }
-        let _ = command.status();
+        run_git_args_with_env(
+            repo_path,
+            ["fetch", "--all", "--tags", "--prune", "--quiet"],
+            None,
+            ssh_command.as_deref(),
+            "git fetch",
+        )
+        .with_context(|| format!("failed to refresh source `{}`", source.id))?;
     }
 
     let rev = source.rev.as_deref().unwrap_or("HEAD");
     let resolved = resolve_checkout_revision(repo_path, rev, ssh_command.as_deref())?;
-    let mut checkout = Command::new("git");
-    checkout
-        .args(["checkout", "--force", resolved.trim()])
-        .current_dir(repo_path);
-    if let Some(ssh_command) = &ssh_command {
-        checkout.env("GIT_SSH_COMMAND", ssh_command);
-    }
-    let checkout_status = checkout.status().context("failed to run `git checkout`")?;
-    if !checkout_status.success() {
-        return Err(anyhow!(
+    run_git_args_with_env(
+        repo_path,
+        [
+            "-c",
+            "advice.detachedHead=false",
+            "checkout",
+            "--quiet",
+            "--force",
+            resolved.trim(),
+        ],
+        None,
+        ssh_command.as_deref(),
+        "git checkout",
+    )
+    .with_context(|| {
+        format!(
             "failed to checkout revision `{}` for source `{}`",
             resolved.trim(),
             source.id
-        ));
-    }
+        )
+    })?;
 
     Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
 }
@@ -503,6 +505,43 @@ where
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_git_args_with_env<I, S>(
+    project_root: &Path,
+    args: I,
+    trailing_arg: Option<&OsStr>,
+    ssh_command: Option<&str>,
+    label: &str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    if let Some(trailing_arg) = trailing_arg {
+        command.arg(trailing_arg);
+    }
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run `{label}`"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "git exited with a non-zero status".to_string()
+        };
+        return Err(anyhow!("{label} failed: {detail}"));
+    }
+    Ok(())
 }
 
 fn relative_path<'a>(project_root: &'a Path, path: &'a Path) -> Result<&'a Path> {
