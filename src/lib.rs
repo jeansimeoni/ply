@@ -5,18 +5,27 @@ mod ops;
 mod prompt_resources;
 mod ui;
 
-use anyhow::{Result, anyhow};
 use adapters::AssetKind;
+use anyhow::{Result, anyhow};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::InitOptions;
-use ops::{ApplyOptions, CleanOptions, CommandTarget, InitRequest, PackageInitRequest};
+use ops::{
+    AddSourceLocation, AddSourceRequest, ApplyOptions, CleanOptions, CommandTarget, InitRequest,
+    PackageInitRequest, RemoveSourceRequest, UpdateSourcesRequest,
+};
 use std::env;
 use std::path::Path;
 use ui::Tone;
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse(env::args().skip(1).collect())?;
+    let Some(cli) = Cli::parse(env::args().skip(1).collect())? else {
+        return Ok(());
+    };
     let project_root = env::current_dir()?;
-    run_command(&project_root, cli.command)
+    match cli.command {
+        Some(command) => run_command(&project_root, command),
+        None => print_help(None),
+    }
 }
 
 pub fn print_error(err: &anyhow::Error) {
@@ -29,8 +38,27 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
     }
 
     match command {
+        Command::Init(InitCommand {
+            command: Some(InitSubcommand::Package(options)),
+            ..
+        }) => {
+            let request = options.resolve(project_root)?;
+            let report = ops::init_package(project_root, request)?;
+            let mut body = format!("Target root: {}", report.target_root.display());
+            body.push_str("\n\nPlanned:");
+            for path in &report.created_paths {
+                body.push('\n');
+                body.push_str(&ui::list_item(&format!("create {}", path.display())));
+            }
+            let title = if report.dry_run {
+                "Package init dry-run"
+            } else {
+                "Initialized Ply package"
+            };
+            ui::print_stdout(Tone::Success, title, &body);
+        }
         Command::Init(options) => {
-            let request = options.resolve()?;
+            let request = options.options.resolve()?;
             let report = ops::init_project(project_root, request)?;
             let mut body = format!("Target root: {}", report.target_root.display());
             body.push_str("\n\nPlanned:");
@@ -60,24 +88,8 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             };
             ui::print_stdout(Tone::Success, title, &body);
         }
-        Command::InitPackage(options) => {
-            let request = options.resolve(&project_root)?;
-            let report = ops::init_package(project_root, request)?;
-            let mut body = format!("Target root: {}", report.target_root.display());
-            body.push_str("\n\nPlanned:");
-            for path in &report.created_paths {
-                body.push('\n');
-                body.push_str(&ui::list_item(&format!("create {}", path.display())));
-            }
-            let title = if report.dry_run {
-                "Package init dry-run"
-            } else {
-                "Initialized Ply package"
-            };
-            ui::print_stdout(Tone::Success, title, &body);
-        }
         Command::Apply(options) => {
-            let report = ops::apply(project_root, options)?;
+            let report = ops::apply(project_root, options.into())?;
             let title = if report.dry_run {
                 "Apply dry-run"
             } else {
@@ -104,16 +116,16 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             };
             ui::print_stdout(tone, "Diff report", body);
         }
-        Command::Doctor { target } => {
-            let summary = ops::doctor(project_root, target)?;
+        Command::Doctor(target) => {
+            let summary = ops::doctor(project_root, command_target(target.global))?;
             ui::print_stdout(Tone::Info, "Doctor report", &summary);
         }
-        Command::List { target } => {
-            let summary = ops::list_packages(project_root, target)?;
+        Command::List(target) => {
+            let summary = ops::list_packages(project_root, command_target(target.global))?;
             ui::print_stdout(Tone::Info, "Resolved packages", &summary);
         }
-        Command::Sources { target } => {
-            let summary = ops::list_sources(project_root, target)?;
+        Command::Sources(target) => {
+            let summary = ops::list_sources(project_root, command_target(target.global))?;
             ui::print_stdout(Tone::Info, "Resolved sources", &summary);
         }
         Command::Adapters => {
@@ -122,6 +134,47 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 "Supported adapters",
                 &adapters::adapter_summary(),
             );
+        }
+        Command::Add(options) => {
+            let location = match (options.path, options.git) {
+                (Some(path), None) => AddSourceLocation::Path(path),
+                (None, Some(repo)) => AddSourceLocation::Git {
+                    repo,
+                    rev: options.rev,
+                },
+                _ => {
+                    return Err(anyhow!(
+                        "`ply add` requires exactly one of `--path` or `--git`"
+                    ));
+                }
+            };
+            let report = ops::add_source(
+                project_root,
+                AddSourceRequest {
+                    id: options.id,
+                    location,
+                },
+            )?;
+            ui::print_stdout(Tone::Success, "Updated manifest", &report.body);
+        }
+        Command::Remove(options) => {
+            let report = ops::remove_source(
+                project_root,
+                RemoveSourceRequest {
+                    id: options.source_id,
+                    force: options.force,
+                },
+            )?;
+            ui::print_stdout(Tone::Warning, "Updated manifest", &report.body);
+        }
+        Command::Update(options) => {
+            let report = ops::update_sources(
+                project_root,
+                UpdateSourcesRequest {
+                    source_id: options.source_id,
+                },
+            )?;
+            ui::print_stdout(Tone::Success, "Updated sources", &report.body);
         }
         Command::Clean(options) => {
             let target = if options.global {
@@ -197,34 +250,71 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             };
             ui::print_stdout(Tone::Warning, title, &body);
         }
-        Command::Help(topic) => print_help(topic),
+        Command::Help(topic) => print_help(topic.topic)?,
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "ply",
+    about = "Composable package manager for coding-agent assets",
+    disable_help_subcommand = true
+)]
 struct Cli {
-    command: Command,
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Subcommand)]
 enum Command {
-    Init(InitCli),
-    InitPackage(InitPackageCli),
-    Apply(ApplyOptions),
+    #[command(about = "initialize Ply in the project, global root, or a package root")]
+    Init(InitCommand),
+    #[command(about = "resolve sources, preview or write managed assets")]
+    Apply(ApplyCli),
+    #[command(about = "show managed content drift with layer origin context")]
     Diff,
-    Doctor { target: CommandTarget },
-    List { target: CommandTarget },
-    Sources { target: CommandTarget },
+    #[command(about = "validate manifest, sources, package roots, and git safety")]
+    Doctor(TargetCli),
+    #[command(about = "show resolved package roots")]
+    List(TargetCli),
+    #[command(about = "show configured sources and pinned revisions")]
+    Sources(TargetCli),
+    #[command(about = "show supported adapters")]
     Adapters,
+    #[command(about = "add a source to ply.toml")]
+    Add(AddCli),
+    #[command(about = "remove a source from ply.toml")]
+    Remove(RemoveCli),
+    #[command(about = "refresh Git sources and rewrite ply.lock")]
+    Update(UpdateCli),
+    #[command(
+        alias = "nuke",
+        about = "remove Ply-managed files from the project or global root"
+    )]
     Clean(CleanCli),
-    Help(HelpTopic),
+    #[command(about = "show this help or help for a specific command")]
+    Help(HelpCli),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Args)]
+struct InitCommand {
+    #[command(subcommand)]
+    command: Option<InitSubcommand>,
+    #[command(flatten)]
+    options: InitCli,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum InitSubcommand {
+    #[command(name = "package", about = "initialize one reusable package root")]
+    Package(InitPackageCli),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
 enum HelpTopic {
-    General,
     Init,
     InitPackage,
     Apply,
@@ -233,57 +323,127 @@ enum HelpTopic {
     List,
     Sources,
     Adapters,
+    Add,
+    Remove,
+    Update,
     Clean,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Args, Default)]
 struct InitCli {
-    scaffold_local_packages: Option<bool>,
-    ignore_config: Option<bool>,
+    #[arg(long = "with-packages", conflicts_with = "without_packages")]
+    with_packages: bool,
+    #[arg(long = "without-packages")]
+    without_packages: bool,
+    #[arg(long = "ignore-config", conflicts_with = "track_config")]
+    ignore_config: bool,
+    #[arg(long = "track-config")]
+    track_config: bool,
+    #[arg(long, short = 'y')]
     yes: bool,
+    #[arg(long, short = 'g')]
     global: bool,
+    #[arg(long)]
     dry_run: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Args, Default)]
 struct CleanCli {
+    #[arg(long, short = 'y')]
     yes: bool,
+    #[arg(long, short = 'g')]
     global: bool,
+    #[arg(long)]
     dry_run: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Args, Default)]
 struct InitPackageCli {
+    #[arg(long)]
     name: Option<String>,
+    #[arg(long)]
     path: Option<String>,
-    kinds: Vec<AssetKind>,
+    #[arg(long, value_delimiter = ',')]
+    kinds: Vec<String>,
+    #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ApplyCli {
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, short = 'y')]
+    yes: bool,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct TargetCli {
+    #[arg(long, short = 'g')]
+    global: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct AddCli {
+    #[arg(long)]
+    id: String,
+    #[arg(long, group = "source_locator")]
+    path: Option<String>,
+    #[arg(long = "git", group = "source_locator")]
+    git: Option<String>,
+    #[arg(long, requires = "git")]
+    rev: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct RemoveCli {
+    source_id: String,
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct UpdateCli {
+    source_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct HelpCli {
+    topic: Option<HelpTopic>,
 }
 
 impl InitCli {
     fn resolve(self) -> Result<InitRequest> {
-        let scaffold_local_packages = match self.scaffold_local_packages {
-            Some(value) => value,
-            None if self.yes => false,
-            None => ui::prompt_yes_no(
+        let scaffold_local_packages = if self.with_packages {
+            true
+        } else if self.without_packages {
+            false
+        } else if self.yes {
+            false
+        } else {
+            ui::prompt_yes_no(
                 "Scaffold local package source",
                 "Do you want Ply to create a local `ply-packages/` source in this target?\n\nChoose this when you want to bake packages directly into the target root.",
                 "Create local package source",
                 false,
             )
-            .map_err(|err| anyhow!("failed to read init option: {err}"))?,
+            .map_err(|err| anyhow!("failed to read init option: {err}"))?
         };
 
-        let ignore_config = match self.ignore_config {
-            Some(value) => value,
-            None if self.yes => true,
-            None => ui::prompt_yes_no(
+        let ignore_config = if self.ignore_config {
+            true
+        } else if self.track_config {
+            false
+        } else if self.yes {
+            true
+        } else {
+            ui::prompt_yes_no(
                 "Ignore Ply config locally",
                 "Do you want all Ply files to stay ignored in this target when it is a Git repo, including `ply.toml`, `ply.lock`, and `ply-packages/`?",
                 "Keep Ply config ignored locally",
                 true,
             )
-            .map_err(|err| anyhow!("failed to read init option: {err}"))?,
+            .map_err(|err| anyhow!("failed to read init option: {err}"))?
         };
 
         Ok(InitRequest {
@@ -306,6 +466,11 @@ impl InitPackageCli {
         let name = self
             .name
             .ok_or_else(|| anyhow!("`ply init package` requires `--name`"))?;
+        let kinds = self
+            .kinds
+            .iter()
+            .map(|item| AssetKind::parse(item.trim()))
+            .collect::<Result<Vec<_>>>()?;
         let path = self
             .path
             .map(std::path::PathBuf::from)
@@ -313,9 +478,18 @@ impl InitPackageCli {
         Ok(PackageInitRequest {
             name,
             path,
-            kinds: self.kinds,
+            kinds,
             dry_run: self.dry_run,
         })
+    }
+}
+
+impl From<ApplyCli> for ApplyOptions {
+    fn from(value: ApplyCli) -> Self {
+        Self {
+            dry_run: value.dry_run,
+            yes: value.yes,
+        }
     }
 }
 
@@ -325,361 +499,115 @@ impl Command {
             self,
             Self::Apply(_)
                 | Self::Diff
-                | Self::Doctor {
-                    target: CommandTarget::Project
-                }
-                | Self::List {
-                    target: CommandTarget::Project
-                }
-                | Self::Sources {
-                    target: CommandTarget::Project
-                }
+                | Self::Doctor(TargetCli { global: false })
+                | Self::List(TargetCli { global: false })
+                | Self::Sources(TargetCli { global: false })
+                | Self::Add(_)
+                | Self::Remove(_)
+                | Self::Update(_)
         )
     }
 }
 
 impl Cli {
-    fn parse(args: Vec<String>) -> Result<Self> {
-        let command = match args.first().map(String::as_str) {
-            None | Some("-h") | Some("--help") => Command::Help(HelpTopic::General),
-            Some("help") => Command::Help(parse_help_topic(&args[1..])?),
-            Some("init") => parse_init_command(&args[1..])?,
-            Some("apply") => parse_apply_command(&args[1..])?,
-            Some("diff") => parse_diff_command(&args[1..])?,
-            Some("doctor") => parse_targeted_command(&args[1..], "doctor")?,
-            Some("list") => parse_targeted_command(&args[1..], "list")?,
-            Some("sources") => parse_targeted_command(&args[1..], "sources")?,
-            Some("adapters") => {
-                parse_simple_help_command(&args[1..], Command::Adapters, HelpTopic::Adapters)?
+    fn parse(args: Vec<String>) -> Result<Option<Self>> {
+        match <Self as Parser>::try_parse_from(std::iter::once("ply".to_string()).chain(args)) {
+            Ok(cli) => Ok(Some(cli)),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                print!("{}", err.render());
+                Ok(None)
             }
-            Some("clean") | Some("nuke") => parse_clean_command(&args[1..])?,
-            Some(other) => {
-                return Err(anyhow!(
-                    "unknown command `{other}`\n\n{}",
-                    help_text(HelpTopic::General).trim_end()
-                ));
-            }
-        };
-        Ok(Self { command })
+            Err(err) => Err(anyhow!(err.to_string())),
+        }
     }
 }
 
-fn parse_help_topic(args: &[String]) -> Result<HelpTopic> {
-    match args {
-        [] => Ok(HelpTopic::General),
-        [topic] => match topic.as_str() {
-            "init" => Ok(HelpTopic::Init),
-            "init-package" => Ok(HelpTopic::InitPackage),
-            "apply" => Ok(HelpTopic::Apply),
-            "diff" => Ok(HelpTopic::Diff),
-            "doctor" => Ok(HelpTopic::Doctor),
-            "list" => Ok(HelpTopic::List),
-            "sources" => Ok(HelpTopic::Sources),
-            "adapters" => Ok(HelpTopic::Adapters),
-            "clean" | "nuke" => Ok(HelpTopic::Clean),
-            other => Err(anyhow!("unknown help topic `{other}`")),
-        },
-        _ => Err(anyhow!("help accepts at most one command name")),
-    }
+fn print_help(topic: Option<HelpTopic>) -> Result<()> {
+    print!("{}", render_help(topic)?);
+    Ok(())
 }
 
-fn parse_simple_help_command(
-    args: &[String],
-    command: Command,
+fn render_help(topic: Option<HelpTopic>) -> Result<String> {
+    let mut command = Cli::command();
+    let target = match topic {
+        None => &mut command,
+        Some(topic) => command_for_topic(&mut command, topic)?,
+    };
+
+    let mut buffer = Vec::new();
+    target.write_long_help(&mut buffer)?;
+    String::from_utf8(buffer).map_err(|err| anyhow!("failed to render help output: {err}"))
+}
+
+fn command_for_topic<'a>(
+    command: &'a mut clap::Command,
     topic: HelpTopic,
-) -> Result<Command> {
-    match args {
-        [] => Ok(command),
-        [flag] if is_help_flag(flag) => Ok(Command::Help(topic)),
-        [other, ..] => Err(anyhow!("unknown flag `{other}`")),
-    }
-}
-
-fn parse_init_command(args: &[String]) -> Result<Command> {
-    if let Some(subcommand) = args.first() {
-        if subcommand == "package" {
-            return parse_init_package_command(&args[1..]);
-        }
-    }
-    let mut cli = InitCli::default();
-    for arg in args {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Init)),
-            "--with-packages" => cli.scaffold_local_packages = Some(true),
-            "--without-packages" => cli.scaffold_local_packages = Some(false),
-            "--ignore-config" => cli.ignore_config = Some(true),
-            "--track-config" => cli.ignore_config = Some(false),
-            "--yes" | "-y" => cli.yes = true,
-            "--global" | "-g" => cli.global = true,
-            "--dry-run" => cli.dry_run = true,
-            other => return Err(anyhow!("unknown flag `{other}`")),
-        }
-    }
-    Ok(Command::Init(cli))
-}
-
-fn parse_init_package_command(args: &[String]) -> Result<Command> {
-    let mut cli = InitPackageCli::default();
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::InitPackage)),
-            "--name" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| anyhow!("missing value for `--name`"))?;
-                cli.name = Some(value.clone());
-            }
-            "--path" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| anyhow!("missing value for `--path`"))?;
-                cli.path = Some(value.clone());
-            }
-            "--kinds" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| anyhow!("missing value for `--kinds`"))?;
-                cli.kinds = value
-                    .split(',')
-                    .map(|item| AssetKind::parse(item.trim()))
-                    .collect::<Result<Vec<_>>>()?;
-            }
-            "--dry-run" => cli.dry_run = true,
-            other => return Err(anyhow!("unknown flag `{other}`")),
-        }
-        index += 1;
-    }
-    Ok(Command::InitPackage(cli))
-}
-
-fn parse_apply_command(args: &[String]) -> Result<Command> {
-    let mut options = ApplyOptions {
-        dry_run: false,
-        yes: false,
+) -> Result<&'a mut clap::Command> {
+    let path: &[&str] = match topic {
+        HelpTopic::Init => &["init"],
+        HelpTopic::InitPackage => &["init", "package"],
+        HelpTopic::Apply => &["apply"],
+        HelpTopic::Diff => &["diff"],
+        HelpTopic::Doctor => &["doctor"],
+        HelpTopic::List => &["list"],
+        HelpTopic::Sources => &["sources"],
+        HelpTopic::Adapters => &["adapters"],
+        HelpTopic::Add => &["add"],
+        HelpTopic::Remove => &["remove"],
+        HelpTopic::Update => &["update"],
+        HelpTopic::Clean => &["clean"],
     };
-    for arg in args {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Apply)),
-            "--dry-run" => options.dry_run = true,
-            "--yes" | "-y" => options.yes = true,
-            other => return Err(anyhow!("unknown flag `{other}`")),
-        }
+
+    let mut current = command;
+    for segment in path {
+        current = current
+            .find_subcommand_mut(segment)
+            .ok_or_else(|| anyhow!("unknown help topic `{segment}`"))?;
     }
-    Ok(Command::Apply(options))
+    Ok(current)
 }
 
-fn parse_diff_command(args: &[String]) -> Result<Command> {
-    match args {
-        [] => Ok(Command::Diff),
-        [flag] if is_help_flag(flag) => Ok(Command::Help(HelpTopic::Diff)),
-        [other, ..] => Err(anyhow!("unknown flag `{other}`")),
-    }
-}
-
-fn parse_targeted_command(args: &[String], name: &str) -> Result<Command> {
-    let mut target = CommandTarget::Project;
-    for arg in args {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                return Ok(Command::Help(match name {
-                    "doctor" => HelpTopic::Doctor,
-                    "list" => HelpTopic::List,
-                    "sources" => HelpTopic::Sources,
-                    _ => unreachable!(),
-                }));
-            }
-            "--global" | "-g" => target = CommandTarget::Global,
-            other => return Err(anyhow!("unknown flag `{other}`")),
-        }
-    }
-    Ok(match name {
-        "doctor" => Command::Doctor { target },
-        "list" => Command::List { target },
-        "sources" => Command::Sources { target },
-        _ => unreachable!(),
-    })
-}
-
-fn parse_clean_command(args: &[String]) -> Result<Command> {
-    let mut options = CleanCli::default();
-    for arg in args {
-        match arg.as_str() {
-            "--help" | "-h" => return Ok(Command::Help(HelpTopic::Clean)),
-            "--yes" | "-y" => options.yes = true,
-            "--global" | "-g" => options.global = true,
-            "--dry-run" => options.dry_run = true,
-            other => return Err(anyhow!("unknown flag `{other}`")),
-        }
-    }
-    Ok(Command::Clean(options))
-}
-
-fn is_help_flag(flag: &str) -> bool {
-    matches!(flag, "--help" | "-h")
-}
-
-fn print_help(topic: HelpTopic) {
-    let title = match topic {
-        HelpTopic::General => "Ply CLI",
-        HelpTopic::Init => "ply init",
-        HelpTopic::InitPackage => "ply init package",
-        HelpTopic::Apply => "ply apply",
-        HelpTopic::Diff => "ply diff",
-        HelpTopic::Doctor => "ply doctor",
-        HelpTopic::List => "ply list",
-        HelpTopic::Sources => "ply sources",
-        HelpTopic::Adapters => "ply adapters",
-        HelpTopic::Clean => "ply clean",
-    };
-    ui::print_stdout(Tone::Info, title, help_text(topic).trim_end());
-}
-
-fn help_text(topic: HelpTopic) -> &'static str {
-    match topic {
-        HelpTopic::General => {
-            r#"ply
-
-Usage:
-  ply <command>
-  ply <command> --help
-
-Commands:
-  init       initialize Ply in the project, global root, or a package root
-  apply      resolve sources, preview or write managed assets
-  diff       show managed content drift with layer origin context
-  doctor     validate manifest, sources, package roots, and git safety
-  list       show resolved package roots
-  sources    show configured sources and pinned revisions
-  adapters   show supported adapters
-  clean      remove Ply-managed files from the project or global root
-  nuke       alias for clean
-  help       show this help or help for a specific command
-"#
-        }
-        HelpTopic::Init => {
-            r#"Usage:
-  ply init [options]
-  ply init package [options]
-
-Options:
-  --with-packages     scaffold a local `ply-packages/` source
-  --without-packages  do not create a local package source
-  --ignore-config     keep Ply config ignored locally when the target is a Git repo (default)
-  --track-config      keep Ply configuration trackable
-  --global, -g        target the user-global Ply root
-  --dry-run           preview what init would create
-  -y, --yes           skip prompts and accept defaults for unspecified options
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::InitPackage => {
-            r#"Usage:
-  ply init package [options]
-
-Options:
-  --name <name>       package name written into ply-package.toml
-  --path <dir>        target package root; defaults to the current directory
-  --kinds <list>      comma-separated asset kinds to scaffold
-  --dry-run           preview what package init would create
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Apply => {
-            r#"Usage:
-  ply apply [options]
-
-Options:
-  --dry-run           preview layering results, planned assets, and drift consent needs
-  -y, --yes           overwrite drifted managed exposed files without prompting
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Diff => {
-            r#"Usage:
-  ply diff
-
-Options:
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Doctor => {
-            r#"Usage:
-  ply doctor [options]
-
-Options:
-  --global, -g        inspect the user-global Ply root
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::List => {
-            r#"Usage:
-  ply list [options]
-
-Options:
-  --global, -g        inspect the user-global Ply root
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Sources => {
-            r#"Usage:
-  ply sources [options]
-
-Options:
-  --global, -g        inspect the user-global Ply root
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Adapters => {
-            r#"Usage:
-  ply adapters
-
-Options:
-  -h, --help          show this help
-"#
-        }
-        HelpTopic::Clean => {
-            r#"Usage:
-  ply clean [options]
-  ply nuke [options]
-
-Options:
-  --global, -g        target the user-global Ply root
-  --dry-run           preview removals without deleting anything
-  -y, --yes           skip the destructive confirmation prompt
-  -h, --help          show this help
-"#
-        }
+fn command_target(global: bool) -> CommandTarget {
+    if global {
+        CommandTarget::Global
+    } else {
+        CommandTarget::Project
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::AssetKind;
     use tempfile::TempDir;
 
     #[test]
     fn commands_that_require_init_return_ply_error() -> Result<()> {
         let temp = TempDir::new()?;
         for command in [
-            Command::Apply(ApplyOptions {
+            Command::Apply(ApplyCli {
                 dry_run: false,
                 yes: false,
             }),
             Command::Diff,
-            Command::Doctor {
-                target: CommandTarget::Project,
-            },
-            Command::List {
-                target: CommandTarget::Project,
-            },
-            Command::Sources {
-                target: CommandTarget::Project,
-            },
+            Command::Doctor(TargetCli { global: false }),
+            Command::List(TargetCli { global: false }),
+            Command::Sources(TargetCli { global: false }),
+            Command::Add(AddCli {
+                id: "local".to_string(),
+                path: Some("./ply-packages/example-review".to_string()),
+                git: None,
+                rev: None,
+            }),
+            Command::Remove(RemoveCli {
+                source_id: "local".to_string(),
+                force: false,
+            }),
+            Command::Update(UpdateCli { source_id: None }),
         ] {
             let err = run_command(temp.path(), command).unwrap_err();
             let message = err.to_string();
@@ -694,8 +622,9 @@ mod tests {
             "apply".to_string(),
             "--dry-run".to_string(),
             "--yes".to_string(),
-        ])?;
-        match cli.command {
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
             Command::Apply(options) => {
                 assert!(options.dry_run);
                 assert!(options.yes);
@@ -711,8 +640,9 @@ mod tests {
             "clean".to_string(),
             "-g".to_string(),
             "--dry-run".to_string(),
-        ])?;
-        match cli.command {
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
             Command::Clean(options) => {
                 assert!(options.global);
                 assert!(options.dry_run);
@@ -734,12 +664,19 @@ mod tests {
             "--kinds".to_string(),
             "skills,commands".to_string(),
             "--dry-run".to_string(),
-        ])?;
-        match cli.command {
-            Command::InitPackage(options) => {
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Init(InitCommand {
+                command: Some(InitSubcommand::Package(options)),
+                ..
+            }) => {
                 assert_eq!(options.name.as_deref(), Some("review-tools"));
                 assert_eq!(options.path.as_deref(), Some("./packages/review-tools"));
-                assert_eq!(options.kinds, vec![AssetKind::Skills, AssetKind::Commands]);
+                assert_eq!(
+                    options.kinds,
+                    vec!["skills".to_string(), "commands".to_string()]
+                );
                 assert!(options.dry_run);
             }
             other => panic!("expected init package command, got {other:?}"),
@@ -756,10 +693,14 @@ mod tests {
             "review-tools".to_string(),
             "--kinds".to_string(),
             "agents".to_string(),
-        ])?;
-        match cli.command {
-            Command::InitPackage(options) => {
-                assert_eq!(options.kinds, vec![AssetKind::Agents]);
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Init(InitCommand {
+                command: Some(InitSubcommand::Package(options)),
+                ..
+            }) => {
+                assert_eq!(options.kinds, vec!["agents".to_string()]);
             }
             other => panic!("expected init package command, got {other:?}"),
         }
@@ -769,8 +710,10 @@ mod tests {
     #[test]
     fn init_yes_defaults_to_ignored_config() -> Result<()> {
         let request = InitCli {
-            scaffold_local_packages: Some(false),
-            ignore_config: None,
+            with_packages: false,
+            without_packages: true,
+            ignore_config: false,
+            track_config: false,
             yes: true,
             global: false,
             dry_run: false,
@@ -778,6 +721,29 @@ mod tests {
         .resolve()?;
 
         assert!(request.options.ignore_config);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_add_git_source_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "add".to_string(),
+            "--id".to_string(),
+            "team".to_string(),
+            "--git".to_string(),
+            "owner/repo".to_string(),
+            "--rev".to_string(),
+            "main".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Add(options) => {
+                assert_eq!(options.id, "team");
+                assert_eq!(options.git.as_deref(), Some("owner/repo"));
+                assert_eq!(options.rev.as_deref(), Some("main"));
+            }
+            other => panic!("expected add command, got {other:?}"),
+        }
         Ok(())
     }
 }

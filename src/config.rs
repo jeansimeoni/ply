@@ -239,6 +239,10 @@ pub fn load_manifest(project_root: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
+pub fn load_manifest_for_edit(project_root: &Path) -> Result<Manifest> {
+    load_manifest(project_root)
+}
+
 pub fn load_local_overlays(project_root: &Path) -> Result<LocalOverlayConfig> {
     let mut merged = LocalOverlayConfig::default();
 
@@ -284,6 +288,27 @@ pub fn write_lockfile(project_root: &Path, lockfile: &Lockfile) -> Result<()> {
     fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
+pub fn load_lockfile_if_present(project_root: &Path) -> Result<Option<Lockfile>> {
+    let path = project_root.join("ply.lock");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let lockfile: Lockfile =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(lockfile))
+}
+
+pub fn write_manifest(project_root: &Path, manifest: &Manifest) -> Result<()> {
+    validate_manifest(manifest)?;
+    let path = project_root.join("ply.toml");
+    let mut sorted = manifest.clone();
+    sorted.sources.sort_by(|a, b| a.id.cmp(&b.id));
+    let content = toml::to_string_pretty(&sorted)?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
 pub fn write_state(project_root: &Path, state: &State) -> Result<()> {
     let ply_dir = project_root.join(".ply");
     fs::create_dir_all(&ply_dir)?;
@@ -297,29 +322,23 @@ pub fn write_default_manifest(project_root: &Path, options: InitOptions) -> Resu
     if path.exists() {
         return Ok(());
     }
-    let template = if options.scaffold_local_packages {
-        r#"schema_version = 1
-adapters = ["codex", "claude"]
-
-[install]
-mode = "copy"
-use_global = true
-
-[[sources]]
-id = "local"
-kind = "path"
-path = "./ply-packages/example-review"
-"#
-    } else {
-        r#"schema_version = 1
-adapters = ["codex", "claude"]
-
-[install]
-mode = "copy"
-use_global = true
-"#
+    let mut manifest = Manifest {
+        schema_version: 1,
+        install: InstallConfig::default(),
+        adapters: default_adapters(),
+        sources: Vec::new(),
     };
-    fs::write(&path, template).with_context(|| format!("failed to write {}", path.display()))
+    if options.scaffold_local_packages {
+        manifest.sources.push(SourceConfig {
+            id: "local".to_string(),
+            kind: "path".to_string(),
+            path: Some("./ply-packages/example-review".to_string()),
+            repo: None,
+            url: None,
+            rev: None,
+        });
+    }
+    write_manifest(project_root, &manifest)
 }
 
 pub fn write_default_local_manifest(project_root: &Path) -> Result<()> {
@@ -376,7 +395,7 @@ pub fn load_package_manifest(package_root: &Path) -> Result<PackageManifest> {
     Ok(manifest)
 }
 
-fn validate_manifest(manifest: &Manifest) -> Result<()> {
+pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
     if manifest.schema_version != 1 {
         return Err(anyhow!(
             "unsupported schema_version `{}`; only version 1 is supported",
@@ -441,8 +460,10 @@ fn validate_local_overlays(overlays: &LocalOverlayConfig) -> Result<()> {
                 overlay.kind
             ));
         }
-        if matches!(adapter.exposure_mode(kind), ExposureMode::GeneratedComposite)
-            && !kind.is_directory_based()
+        if matches!(
+            adapter.exposure_mode(kind),
+            ExposureMode::GeneratedComposite
+        ) && !kind.is_directory_based()
             && !overlay.path.ends_with(".md")
         {
             return Err(anyhow!(
@@ -629,8 +650,18 @@ path = ".ply/overlays/codex/skills"
 
         let overlays = load_local_overlays(temp.path())?;
         assert_eq!(overlays.overlays.len(), 2);
-        assert!(overlays.overlays.iter().any(|overlay| overlay.adapter == "codex"));
-        assert!(overlays.overlays.iter().any(|overlay| overlay.adapter == "claude"));
+        assert!(
+            overlays
+                .overlays
+                .iter()
+                .any(|overlay| overlay.adapter == "codex")
+        );
+        assert!(
+            overlays
+                .overlays
+                .iter()
+                .any(|overlay| overlay.adapter == "claude")
+        );
         Ok(())
     }
 
@@ -690,6 +721,9 @@ path = ".ply/overlays/codex/skills"
         };
 
         let err = validate_ssh_config(&config).unwrap_err();
-        assert!(err.to_string().contains("both `ssh_key_path` and `ssh_key_env`"));
+        assert!(
+            err.to_string()
+                .contains("both `ssh_key_path` and `ssh_key_env`")
+        );
     }
 }

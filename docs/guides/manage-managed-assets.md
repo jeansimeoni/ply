@@ -44,6 +44,16 @@ file.
 Use:
 
 ```bash
+ply update
+ply update team
+```
+
+when you want to refresh Git source revisions in `ply.lock` without writing
+managed assets.
+
+Use:
+
+```bash
 ply apply --yes
 ```
 

@@ -48,6 +48,9 @@ The current MVP supports:
 
 - `ply init`
 - `ply init package`
+- `ply add`
+- `ply remove`
+- `ply update`
 - `ply apply`
 - `ply diff`
 - `ply doctor`
@@ -146,6 +149,19 @@ Git source `rev` accepts:
 - a branch name such as `main` or `master`
 - a tag
 - a commit SHA
+
+Use the manifest mutation commands for normal source management:
+
+```bash
+ply add --id local --path ./ply-packages/example-review
+ply add --id team --git owner/ply-team --rev main
+ply remove team
+ply update
+ply update local-git-source
+```
+
+Ply still uses the current source-only model: each `[[sources]]` entry points
+at exactly one package root.
 
 ## Local config layers
 

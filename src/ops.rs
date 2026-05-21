@@ -8,15 +8,15 @@ use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
 use crate::config::{
     self, InitOptions, LocalManifest, LocalOverlayConfig, LocalSourceConfig, LockedSource,
     Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, SourceConfig, SshConfigFile,
-    SshSourceConfig, State, load_local_manifest_if_present, load_local_overlays, load_manifest,
-    load_manifest_if_present, load_package_manifest, load_ssh_config_if_present, load_state,
+    SshSourceConfig, State, load_local_manifest_if_present, load_local_overlays,
+    load_lockfile_if_present, load_manifest, load_manifest_for_edit, load_manifest_if_present,
+    load_package_manifest, load_ssh_config_if_present, load_state,
 };
 use crate::git;
 use crate::prompt_resources::{
     is_prompt_resource, parse_prompt_resource, primary_markdown_name, prompt_logical_name,
     render_claude_markdown, render_codex_agent, render_codex_prompt_preamble,
-    render_codex_skill_markdown,
-    render_codex_skill_sidecar,
+    render_codex_skill_markdown, render_codex_skill_sidecar,
 };
 use crate::ui::{self, Tone};
 
@@ -216,6 +216,34 @@ pub struct ApplyReport {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum AddSourceLocation {
+    Path(String),
+    Git { repo: String, rev: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct AddSourceRequest {
+    pub id: String,
+    pub location: AddSourceLocation,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveSourceRequest {
+    pub id: String,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateSourcesRequest {
+    pub source_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceMutationReport {
+    pub body: String,
+}
+
 pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitReport> {
     let target_root = target_root(project_root, request.target)?;
 
@@ -305,6 +333,147 @@ pub fn init_package(project_root: &Path, request: PackageInitRequest) -> Result<
     })
 }
 
+pub fn add_source(project_root: &Path, request: AddSourceRequest) -> Result<SourceMutationReport> {
+    let mut manifest = load_manifest_for_edit(project_root)?;
+    let source = match request.location {
+        AddSourceLocation::Path(path) => SourceConfig {
+            id: request.id.clone(),
+            kind: "path".to_string(),
+            path: Some(path),
+            repo: None,
+            url: None,
+            rev: None,
+        },
+        AddSourceLocation::Git { repo, rev } => SourceConfig {
+            id: request.id.clone(),
+            kind: "git".to_string(),
+            path: None,
+            repo: Some(repo),
+            url: None,
+            rev,
+        },
+    };
+
+    if manifest
+        .sources
+        .iter()
+        .any(|existing| existing.id == source.id)
+    {
+        return Err(anyhow!("duplicate source id `{}`", source.id));
+    }
+
+    manifest.sources.push(source.clone());
+    config::write_manifest(project_root, &manifest)?;
+
+    let mut body = format!("Updated {}", project_root.join("ply.toml").display());
+    body.push_str("\n\nAdded:");
+    body.push('\n');
+    body.push_str(&ui::list_item(&render_source_summary(&source)));
+
+    if source.kind == "git" {
+        let report = update_sources(
+            project_root,
+            UpdateSourcesRequest {
+                source_id: Some(source.id.clone()),
+            },
+        )?;
+        body.push_str("\n\nLockfile:");
+        body.push('\n');
+        body.push_str(&ui::list_item(
+            "refreshed ply.lock for the added Git source and preserved other locked Git revisions when present",
+        ));
+        body.push_str("\n\nUpdate summary:");
+        body.push('\n');
+        body.push_str(&report.body);
+    }
+
+    Ok(SourceMutationReport { body })
+}
+
+pub fn remove_source(
+    project_root: &Path,
+    request: RemoveSourceRequest,
+) -> Result<SourceMutationReport> {
+    let mut manifest = load_manifest_for_edit(project_root)?;
+    let Some(index) = manifest
+        .sources
+        .iter()
+        .position(|source| source.id == request.id)
+    else {
+        return Err(anyhow!("source `{}` is not configured", request.id));
+    };
+    let removed = manifest.sources.remove(index);
+    config::write_manifest(project_root, &manifest)?;
+
+    let mut pruned_lock = false;
+    if let Some(mut lockfile) = load_lockfile_if_present(project_root)? {
+        let original_len = lockfile.sources.len();
+        lockfile.sources.retain(|source| source.id != request.id);
+        pruned_lock = lockfile.sources.len() != original_len;
+        if pruned_lock {
+            config::write_lockfile(project_root, &lockfile)?;
+        }
+    }
+
+    let mut body = format!("Updated {}", project_root.join("ply.toml").display());
+    body.push_str("\n\nRemoved:");
+    body.push('\n');
+    body.push_str(&ui::list_item(&render_source_summary(&removed)));
+    if request.force {
+        body.push_str("\n\nFlags:");
+        body.push('\n');
+        body.push_str(&ui::list_item(
+            "`--force` is accepted for future compatibility; no source-reference override was needed in this source-only model",
+        ));
+    }
+    if pruned_lock {
+        body.push_str("\n\nLockfile:");
+        body.push('\n');
+        body.push_str(&ui::list_item(
+            "removed the stale source entry from ply.lock",
+        ));
+    }
+
+    Ok(SourceMutationReport { body })
+}
+
+pub fn update_sources(
+    project_root: &Path,
+    request: UpdateSourcesRequest,
+) -> Result<SourceMutationReport> {
+    let composition = compose_project_config(project_root)?;
+    let previous_lock = load_lockfile_if_present(project_root)?;
+    let resolved_sources =
+        resolve_sources_for_update(project_root, &composition, &request, previous_lock)?;
+    let updated_git_ids = collect_updated_git_ids(&composition, &request)?;
+
+    let lockfile = Lockfile {
+        schema_version: 1,
+        sources: resolved_sources
+            .iter()
+            .map(|source| LockedSource {
+                id: source.id.clone(),
+                kind: source.kind.clone(),
+                resolved: source.resolved.clone(),
+            })
+            .collect(),
+    };
+    config::write_lockfile(project_root, &lockfile)?;
+
+    let mut body = format!("Updated {}", project_root.join("ply.lock").display());
+    if updated_git_ids.is_empty() {
+        body.push_str("\n\nNo Git sources were configured.");
+    } else {
+        body.push_str("\n\nRefreshed Git sources:");
+        for id in updated_git_ids {
+            body.push('\n');
+            body.push_str(&ui::list_item(&id));
+        }
+    }
+
+    Ok(SourceMutationReport { body })
+}
+
 fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> Result<()> {
     if !target_root.exists() {
         return Ok(());
@@ -315,7 +484,14 @@ fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> R
         entries.push(entry?);
     }
 
-    let allowed_names = [".git", ".gitignore", "README", "README.md", "LICENSE", "LICENSE.md"];
+    let allowed_names = [
+        ".git",
+        ".gitignore",
+        "README",
+        "README.md",
+        "LICENSE",
+        "LICENSE.md",
+    ];
     for entry in &entries {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -675,14 +851,20 @@ pub fn doctor(project_root: &Path, target: CommandTarget) -> Result<String> {
         if !generated.exists() {
             warnings.push(ui::status_line(
                 Tone::Warning,
-                &format!("state points to missing generated path {}", owned.generated_path),
+                &format!(
+                    "state points to missing generated path {}",
+                    owned.generated_path
+                ),
             ));
         }
         let exposed = root.join(&owned.exposed_path);
         if !exposed.exists() {
             warnings.push(ui::status_line(
                 Tone::Warning,
-                &format!("state points to missing exposed path {}", owned.exposed_path),
+                &format!(
+                    "state points to missing exposed path {}",
+                    owned.exposed_path
+                ),
             ));
         }
     }
@@ -741,6 +923,56 @@ pub fn list_sources(project_root: &Path, target: CommandTarget) -> Result<String
         lines.push(ui::list_item("No sources configured."));
     }
     Ok(lines.join("\n"))
+}
+
+fn render_source_summary(source: &SourceConfig) -> String {
+    match source.kind.as_str() {
+        "path" => format!(
+            "{} [path] {}",
+            source.id,
+            source.path.as_deref().unwrap_or("<missing-path>")
+        ),
+        "git" => {
+            let repo = source
+                .repo
+                .as_deref()
+                .or(source.url.as_deref())
+                .unwrap_or("<missing-repo>");
+            match source.rev.as_deref() {
+                Some(rev) => format!("{} [git] {} @ {}", source.id, repo, rev),
+                None => format!("{} [git] {}", source.id, repo),
+            }
+        }
+        _ => format!("{} [{}]", source.id, source.kind),
+    }
+}
+
+fn collect_updated_git_ids(
+    composition: &ComposedConfig,
+    request: &UpdateSourcesRequest,
+) -> Result<Vec<String>> {
+    match request.source_id.as_deref() {
+        Some(source_id) => {
+            let source = composition
+                .sources
+                .iter()
+                .find(|source| source.config.id == source_id)
+                .ok_or_else(|| anyhow!("source `{source_id}` is not configured"))?;
+            if source.config.kind != "git" {
+                return Err(anyhow!(
+                    "source `{source_id}` is a `{}` source; only Git sources can be refreshed",
+                    source.config.kind
+                ));
+            }
+            Ok(vec![source_id.to_string()])
+        }
+        None => Ok(composition
+            .sources
+            .iter()
+            .filter(|source| source.config.kind == "git")
+            .map(|source| source.config.id.clone())
+            .collect()),
+    }
 }
 
 fn target_root(project_root: &Path, target: CommandTarget) -> Result<PathBuf> {
@@ -855,45 +1087,121 @@ fn compose_layers(layers: Vec<LayerConfig>) -> Result<ComposedConfig> {
     })
 }
 
+fn resolve_sources_for_update(
+    project_root: &Path,
+    config: &ComposedConfig,
+    request: &UpdateSourcesRequest,
+    previous_lock: Option<Lockfile>,
+) -> Result<Vec<ResolvedSource>> {
+    let previous_by_id = previous_lock
+        .unwrap_or_default()
+        .sources
+        .into_iter()
+        .map(|source| (source.id.clone(), source))
+        .collect::<BTreeMap<_, _>>();
+    let target_id = request.source_id.as_deref();
+    let mut found_target = target_id.is_none();
+    let mut sources = Vec::new();
+
+    for source in &config.sources {
+        let resolved = match source.config.kind.as_str() {
+            "path" => resolve_path_source(source)?,
+            "git" => {
+                if target_id.is_none() || target_id == Some(source.config.id.as_str()) {
+                    found_target = true;
+                    resolve_git_source(source)?
+                } else {
+                    let Some(previous) = previous_by_id.get(&source.config.id) else {
+                        return Err(anyhow!(
+                            "cannot refresh only source `{}` because ply.lock does not contain a previous revision for Git source `{}`; run `ply update` without a source id first",
+                            target_id.unwrap_or_default(),
+                            source.config.id
+                        ));
+                    };
+                    if previous.kind != source.config.kind {
+                        return Err(anyhow!(
+                            "cannot preserve locked revision for source `{}` because ply.lock recorded kind `{}` but the current manifest uses `{}`",
+                            source.config.id,
+                            previous.kind,
+                            source.config.kind
+                        ));
+                    }
+                    ResolvedSource {
+                        id: source.config.id.clone(),
+                        kind: source.config.kind.clone(),
+                        resolved: previous.resolved.clone(),
+                        root: git_source_root(project_root, source),
+                        layer: source.layer,
+                    }
+                }
+            }
+            other => return Err(anyhow!("unsupported source kind `{other}`")),
+        };
+        sources.push(resolved);
+    }
+
+    if !found_target {
+        let target_id = target_id.expect("target id should exist when not found");
+        return Err(anyhow!("source `{target_id}` is not configured"));
+    }
+
+    Ok(sources)
+}
+
+fn resolve_path_source(source: &MergedSource) -> Result<ResolvedSource> {
+    let path = source.root.join(
+        source
+            .config
+            .path
+            .as_deref()
+            .ok_or_else(|| anyhow!("path source `{}` missing path", source.config.id))?,
+    );
+    let root = path.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve path source `{}` at {}",
+            source.config.id,
+            path.display()
+        )
+    })?;
+    Ok(ResolvedSource {
+        id: source.config.id.clone(),
+        kind: source.config.kind.clone(),
+        resolved: root.display().to_string(),
+        root,
+        layer: source.layer,
+    })
+}
+
+fn resolve_git_source(source: &MergedSource) -> Result<ResolvedSource> {
+    let (root, revision) =
+        git::clone_or_update_source(&source.root, &source.config, source.ssh_config.as_ref())?;
+    Ok(ResolvedSource {
+        id: source.config.id.clone(),
+        kind: source.config.kind.clone(),
+        resolved: revision,
+        root,
+        layer: source.layer,
+    })
+}
+
+fn git_source_root(project_root: &Path, source: &MergedSource) -> PathBuf {
+    let _ = project_root;
+    source
+        .root
+        .join(".ply")
+        .join("cache")
+        .join("sources")
+        .join(&source.config.id)
+}
+
 fn resolve_composed(
     config: &ComposedConfig,
 ) -> Result<(Vec<ResolvedSource>, Vec<ResolvedPackage>)> {
     let mut sources = Vec::new();
     for source in &config.sources {
         let resolved = match source.config.kind.as_str() {
-            "path" => {
-                let path =
-                    source
-                        .root
-                        .join(source.config.path.as_deref().ok_or_else(|| {
-                            anyhow!("path source `{}` missing path", source.config.id)
-                        })?);
-                let root = path.canonicalize().with_context(|| {
-                    format!(
-                        "failed to resolve path source `{}` at {}",
-                        source.config.id,
-                        path.display()
-                    )
-                })?;
-                ResolvedSource {
-                    id: source.config.id.clone(),
-                    kind: source.config.kind.clone(),
-                    resolved: root.display().to_string(),
-                    root,
-                    layer: source.layer,
-                }
-            }
-            "git" => {
-                let (root, revision) =
-                    git::clone_or_update_source(&source.root, &source.config, source.ssh_config.as_ref())?;
-                ResolvedSource {
-                    id: source.config.id.clone(),
-                    kind: source.config.kind.clone(),
-                    resolved: revision,
-                    root,
-                    layer: source.layer,
-                }
-            }
+            "path" => resolve_path_source(source)?,
+            "git" => resolve_git_source(source)?,
             other => return Err(anyhow!("unsupported source kind `{other}`")),
         };
         sources.push(resolved);
@@ -1002,7 +1310,10 @@ fn build_plan(
                     AssetKind::LocalInstructions,
                     &local_instructions,
                     package.source_layer,
-                    format!("package {} from source {}", package.manifest.name, package.source_id),
+                    format!(
+                        "package {} from source {}",
+                        package.manifest.name, package.source_id
+                    ),
                     &mut sections,
                 )?;
             }
@@ -1256,9 +1567,9 @@ fn collect_prompt_document_plan(
         (AdapterKind::Claude, AssetKind::Commands)
         | (AdapterKind::Claude, AssetKind::OutputStyles) => {
             let rendered = render_claude_markdown(kind, &resource)?;
-            let rel = source_file
-                .file_name()
-                .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
+            let rel = source_file.file_name().ok_or_else(|| {
+                anyhow!("invalid prompt resource path `{}`", source_file.display())
+            })?;
             let rel = managed_relative_path(kind, Path::new(rel))?;
             push_rendered_file(
                 project_root,
@@ -1276,9 +1587,9 @@ fn collect_prompt_document_plan(
         }
         (AdapterKind::Codex, AssetKind::Commands) => {
             let rendered = render_codex_prompt_markdown(&resource);
-            let rel = source_file
-                .file_name()
-                .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", source_file.display()))?;
+            let rel = source_file.file_name().ok_or_else(|| {
+                anyhow!("invalid prompt resource path `{}`", source_file.display())
+            })?;
             let rel = managed_relative_path(kind, Path::new(rel))?;
             push_rendered_file(
                 project_root,
@@ -1338,9 +1649,12 @@ fn collect_prompt_directory_plan(
         .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", resource_dir.display()))?
         .to_string();
     let managed_name = ensure_managed_name(kind, &logical_name);
-    let parent = resource_dir
-        .parent()
-        .ok_or_else(|| anyhow!("resource directory `{}` has no parent", resource_dir.display()))?;
+    let parent = resource_dir.parent().ok_or_else(|| {
+        anyhow!(
+            "resource directory `{}` has no parent",
+            resource_dir.display()
+        )
+    })?;
     let metadata = load_resource_metadata(parent, &logical_name)?;
     if !resource_targets_adapter(metadata.as_ref(), adapter)? {
         return Ok(());
@@ -1352,7 +1666,10 @@ fn collect_prompt_directory_plan(
         return Err(anyhow!(
             "{} `{}` is missing {}",
             kind.as_str(),
-            resource_dir.strip_prefix(parent).unwrap_or(resource_dir).display(),
+            resource_dir
+                .strip_prefix(parent)
+                .unwrap_or(resource_dir)
+                .display(),
             primary_name
         ));
     }
@@ -1546,7 +1863,13 @@ fn push_rendered_file(
         .join(&relative_path_within_kind);
     let exposed_root = adapter
         .direct_asset_root(project_root, kind)
-        .ok_or_else(|| anyhow!("no direct root for `{}` `{}`", adapter.as_str(), kind.as_str()))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "no direct root for `{}` `{}`",
+                adapter.as_str(),
+                kind.as_str()
+            )
+        })?;
     let exposed_relative_path = exposed_root
         .strip_prefix(project_root)?
         .join(&relative_path_within_kind);
@@ -1581,7 +1904,9 @@ fn push_rendered_file(
     Ok(())
 }
 
-fn render_codex_prompt_markdown(resource: &crate::prompt_resources::ParsedPromptResource) -> String {
+fn render_codex_prompt_markdown(
+    resource: &crate::prompt_resources::ParsedPromptResource,
+) -> String {
     match render_codex_prompt_preamble(resource) {
         Some(preamble) if !resource.body.is_empty() => format!("{preamble}{}\n", resource.body),
         Some(preamble) => preamble,
@@ -1631,7 +1956,13 @@ fn collect_planned_files(
             .join(&managed_rel);
         let exposed_root = adapter
             .direct_asset_root(project_root, kind)
-            .ok_or_else(|| anyhow!("no direct root for `{}` `{}`", adapter.as_str(), kind.as_str()))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "no direct root for `{}` `{}`",
+                    adapter.as_str(),
+                    kind.as_str()
+                )
+            })?;
         let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(&managed_rel);
 
         if let Some(index) = seen.get(&generated_relative_path).copied() {
@@ -2236,7 +2567,10 @@ fn is_asset_metadata_file(path: &Path) -> bool {
     name == "ply-asset.toml" || name.ends_with(".ply-asset.toml")
 }
 
-fn load_resource_metadata(source_dir: &Path, top_level_name: &str) -> Result<Option<AssetMetadata>> {
+fn load_resource_metadata(
+    source_dir: &Path,
+    top_level_name: &str,
+) -> Result<Option<AssetMetadata>> {
     let top_level_path = source_dir.join(top_level_name);
     let metadata_path = if top_level_path.is_dir() {
         top_level_path.join("ply-asset.toml")
@@ -2266,7 +2600,10 @@ fn load_asset_metadata(path: &Path) -> Result<Option<AssetMetadata>> {
     Ok(Some(metadata))
 }
 
-fn resource_targets_adapter(metadata: Option<&AssetMetadata>, adapter: AdapterKind) -> Result<bool> {
+fn resource_targets_adapter(
+    metadata: Option<&AssetMetadata>,
+    adapter: AdapterKind,
+) -> Result<bool> {
     let Some(metadata) = metadata else {
         return Ok(true);
     };
@@ -2276,7 +2613,10 @@ fn resource_targets_adapter(metadata: Option<&AssetMetadata>, adapter: AdapterKi
     for target in &metadata.targets {
         AdapterKind::parse(target)?;
     }
-    Ok(metadata.targets.iter().any(|target| target == adapter.as_str()))
+    Ok(metadata
+        .targets
+        .iter()
+        .any(|target| target == adapter.as_str()))
 }
 
 fn merge_local_manifest(
@@ -2296,7 +2636,9 @@ fn merge_local_manifest(
         if let Some(index) = source_index.get(&local_source.id).copied() {
             apply_local_source_override(&mut manifest.sources[index], &local_source);
         } else {
-            manifest.sources.push(materialize_local_source(local_source)?);
+            manifest
+                .sources
+                .push(materialize_local_source(local_source)?);
         }
     }
     Ok(manifest)
@@ -2323,9 +2665,12 @@ fn apply_local_source_override(target: &mut SourceConfig, local: &LocalSourceCon
 }
 
 fn materialize_local_source(local: LocalSourceConfig) -> Result<SourceConfig> {
-    let kind = local
-        .kind
-        .ok_or_else(|| anyhow!("local source `{}` must define `kind` when adding a new source", local.id))?;
+    let kind = local.kind.ok_or_else(|| {
+        anyhow!(
+            "local source `{}` must define `kind` when adding a new source",
+            local.id
+        )
+    })?;
     Ok(SourceConfig {
         id: local.id,
         kind,
@@ -2371,6 +2716,31 @@ mod tests {
         exec_in(temp.path(), &["config", "user.email", "test@example.com"])?;
         exec_in(temp.path(), &["config", "user.name", "Test User"])?;
         Ok(temp)
+    }
+
+    fn init_git_package_repo(path: &Path, package_name: &str) -> Result<String> {
+        fs::create_dir_all(path.join("skills").join("review"))?;
+        exec_in(path, &["init"])?;
+        exec_in(path, &["config", "user.email", "test@example.com"])?;
+        exec_in(path, &["config", "user.name", "Test User"])?;
+        write(
+            &path.join("ply-package.toml"),
+            &format!("name = \"{package_name}\"\n"),
+        )?;
+        write(
+            &path.join("skills").join("review").join("SKILL.md"),
+            "# review\n",
+        )?;
+        exec_in(path, &["add", "."])?;
+        exec_in(path, &["commit", "-m", "initial package"])?;
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("git rev-parse failed for {}", path.display()));
+        }
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
     #[test]
@@ -2517,7 +2887,10 @@ mod tests {
             package_root.display()
         );
         write(&temp.path().join("ply.toml"), &manifest)?;
-        write(&temp.path().join("ply.local.toml"), "schema_version = 1\n")?;
+        write(
+            &temp.path().join("ply.local.toml"),
+            "schema_version = 1\n",
+        )?;
         write(
             &temp.path().join(".ply").join("state.json"),
             "{\n  \"schema_version\": 1,\n  \"install_mode\": \"copy\",\n  \"ignore_config\": false,\n  \"owned_paths\": []\n}\n",
@@ -2636,7 +3009,8 @@ mod tests {
                 .exists()
         );
         assert!(
-            !temp.path()
+            !temp
+                .path()
                 .join(".codex")
                 .join("agents")
                 .join("ply-claude-reviewer.toml")
@@ -2687,7 +3061,8 @@ mod tests {
         )?;
 
         assert!(
-            !temp.path()
+            !temp
+                .path()
                 .join(".agents")
                 .join("skills")
                 .join("ply-review-diff")
@@ -2711,7 +3086,8 @@ mod tests {
                 .exists()
         );
         assert!(
-            !temp.path()
+            !temp
+                .path()
                 .join(".claude")
                 .join("skills")
                 .join("ply-codex-only")
@@ -2787,7 +3163,8 @@ mod tests {
                 .exists()
         );
         assert!(
-            !temp.path()
+            !temp
+                .path()
                 .join(".claude")
                 .join("commands")
                 .join("ply-codex-only.md")
@@ -2864,21 +3241,15 @@ mod tests {
             "Prefer local-first workflows.\n",
         )?;
         write(
-            &package_root
-                .join("output-styles")
-                .join("ply-review.md"),
+            &package_root.join("output-styles").join("ply-review.md"),
             "Be concise and bug-focused.\n",
         )?;
         write(
-            &package_root
-                .join("rules")
-                .join("ply-safe.md"),
+            &package_root.join("rules").join("ply-safe.md"),
             "Never mutate tracked files without consent.\n",
         )?;
         write(
-            &package_root
-                .join("hooks")
-                .join("ply-lint.sh"),
+            &package_root.join("hooks").join("ply-lint.sh"),
             "#!/usr/bin/env bash\necho lint\n",
         )?;
 
@@ -2923,18 +3294,13 @@ mod tests {
             },
         )?;
         let package_root = example_package_root(temp.path());
-        write(
-            &temp.path().join("CLAUDE.local.md"),
-            "Personal note.\n",
-        )?;
+        write(&temp.path().join("CLAUDE.local.md"), "Personal note.\n")?;
         write(
             &package_root.join("local-instructions.md"),
             "Work through diffs carefully.\n",
         )?;
         write(
-            &package_root
-                .join("output-styles")
-                .join("ply-review.md"),
+            &package_root.join("output-styles").join("ply-review.md"),
             "Surface findings first.\n",
         )?;
 
@@ -3040,9 +3406,7 @@ Review carefully and surface findings first.
         )?;
 
         write(
-            &package_root
-                .join("output-styles")
-                .join("concise.md"),
+            &package_root.join("output-styles").join("concise.md"),
             r#"---
 name: Concise
 description: Keep responses tight
@@ -3064,14 +3428,22 @@ Use short, direct responses.
             },
         )?;
 
-        let claude_command =
-            fs::read_to_string(temp.path().join(".claude").join("commands").join("ply-docs.md"))?;
+        let claude_command = fs::read_to_string(
+            temp.path()
+                .join(".claude")
+                .join("commands")
+                .join("ply-docs.md"),
+        )?;
         assert!(claude_command.contains("allowed-tools:"));
         assert!(claude_command.contains("argument-hint:"));
         assert!(claude_command.contains("topic"));
 
-        let codex_command =
-            fs::read_to_string(temp.path().join(".agents").join("commands").join("ply-docs.md"))?;
+        let codex_command = fs::read_to_string(
+            temp.path()
+                .join(".agents")
+                .join("commands")
+                .join("ply-docs.md"),
+        )?;
         assert!(codex_command.contains("## Ply Codex Settings"));
         assert!(codex_command.contains("Preferred model: gpt-5.5"));
         assert!(codex_command.contains("Write concise documentation"));
@@ -3114,8 +3486,12 @@ Use short, direct responses.
         )?;
         assert!(claude_agent.contains("model: sonnet"));
         assert!(claude_agent.contains("tools:"));
-        let codex_agent =
-            fs::read_to_string(temp.path().join(".codex").join("agents").join("ply-reviewer.toml"))?;
+        let codex_agent = fs::read_to_string(
+            temp.path()
+                .join(".codex")
+                .join("agents")
+                .join("ply-reviewer.toml"),
+        )?;
         assert!(codex_agent.contains("model = \"gpt-5.5\""));
         assert!(codex_agent.contains("model_reasoning_effort = \"high\""));
         assert!(codex_agent.contains("sandbox_mode = \"workspace-write\""));
@@ -3165,7 +3541,10 @@ Use short, direct responses.
             },
         )
         .unwrap_err();
-        assert!(err.to_string().contains("must not author `agents/openai.yaml` directly"));
+        assert!(
+            err.to_string()
+                .contains("must not author `agents/openai.yaml` directly")
+        );
         Ok(())
     }
 
@@ -3237,7 +3616,12 @@ Use short, direct responses.
             },
         )?;
         assert_eq!(report.target_root, target);
-        assert!(temp.path().join("review-tools").join("ply-package.toml").exists());
+        assert!(
+            temp.path()
+                .join("review-tools")
+                .join("ply-package.toml")
+                .exists()
+        );
         assert!(temp.path().join("review-tools").join("skills").exists());
         Ok(())
     }
@@ -3257,6 +3641,158 @@ Use short, direct responses.
         )
         .unwrap_err();
         assert!(err.to_string().contains("refusing to initialize package"));
+        Ok(())
+    }
+
+    #[test]
+    fn add_path_source_rewrites_manifest() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: false,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let package_root = temp.path().join("custom-package");
+        fs::create_dir_all(package_root.join("skills").join("check"))?;
+        write(
+            &package_root.join("ply-package.toml"),
+            "name = \"custom-package\"\n",
+        )?;
+        write(
+            &package_root.join("skills").join("check").join("SKILL.md"),
+            "# check\n",
+        )?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "local".to_string(),
+                location: AddSourceLocation::Path("./custom-package".to_string()),
+            },
+        )?;
+
+        let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert!(manifest.contains("[[sources]]"));
+        assert!(manifest.contains("id = \"local\""));
+        assert!(manifest.contains("path = \"./custom-package\""));
+        Ok(())
+    }
+
+    #[test]
+    fn add_git_source_updates_lockfile_and_remove_prunes_it() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: false,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let repo_root = temp.path().join("team-source");
+        let initial_commit = init_git_package_repo(&repo_root, "team-source")?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-source".to_string(),
+                    rev: Some("HEAD".to_string()),
+                },
+            },
+        )?;
+
+        let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert!(manifest.contains("repo = \"./team-source\""));
+        let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert!(lockfile.contains("id = \"team\""));
+        assert!(lockfile.contains(&format!("resolved = \"{initial_commit}\"")));
+
+        remove_source(
+            temp.path(),
+            RemoveSourceRequest {
+                id: "team".to_string(),
+                force: false,
+            },
+        )?;
+
+        let manifest = fs::read_to_string(temp.path().join("ply.toml"))?;
+        assert!(!manifest.contains("id = \"team\""));
+        let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert!(!lockfile.contains("id = \"team\""));
+        Ok(())
+    }
+
+    #[test]
+    fn update_named_git_source_preserves_other_locked_git_revisions() -> Result<()> {
+        let temp = make_project()?;
+        init_project(
+            temp.path(),
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: false,
+                    ignore_config: false,
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+
+        let repo_one = temp.path().join("team-one");
+        let repo_two = temp.path().join("team-two");
+        let _first_one = init_git_package_repo(&repo_one, "team-one")?;
+        let first_two = init_git_package_repo(&repo_two, "team-two")?;
+
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team-one".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-one".to_string(),
+                    rev: Some("HEAD".to_string()),
+                },
+            },
+        )?;
+        add_source(
+            temp.path(),
+            AddSourceRequest {
+                id: "team-two".to_string(),
+                location: AddSourceLocation::Git {
+                    repo: "./team-two".to_string(),
+                    rev: Some("HEAD".to_string()),
+                },
+            },
+        )?;
+
+        write(&repo_one.join("README.md"), "# updated\n")?;
+        exec_in(&repo_one, &["add", "README.md"])?;
+        exec_in(&repo_one, &["commit", "-m", "update package"])?;
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_one)
+            .output()?;
+        let second_one = String::from_utf8(output.stdout)?.trim().to_string();
+
+        update_sources(
+            temp.path(),
+            UpdateSourcesRequest {
+                source_id: Some("team-one".to_string()),
+            },
+        )?;
+
+        let lockfile = fs::read_to_string(temp.path().join("ply.lock"))?;
+        assert!(lockfile.contains(&format!("resolved = \"{second_one}\"")));
+        assert!(lockfile.contains(&format!("resolved = \"{first_two}\"")));
         Ok(())
     }
 

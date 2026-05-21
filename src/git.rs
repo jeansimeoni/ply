@@ -220,16 +220,23 @@ fn resolve_repo_spec(project_root: &Path, repo: &str) -> Result<ResolvedRepoSpec
 
     let repo_path = PathBuf::from(repo);
     if repo_path.is_absolute() || repo.starts_with("./") || repo.starts_with("../") {
-        return Ok(ResolvedRepoSpec::LocalPath(project_root.join(repo).canonicalize().with_context(
-            || format!("failed to resolve local repo path {}", project_root.join(repo).display()),
-        )?));
+        return Ok(ResolvedRepoSpec::LocalPath(
+            project_root.join(repo).canonicalize().with_context(|| {
+                format!(
+                    "failed to resolve local repo path {}",
+                    project_root.join(repo).display()
+                )
+            })?,
+        ));
     }
 
     let candidate = project_root.join(repo);
     if candidate.exists() {
-        return Ok(ResolvedRepoSpec::LocalPath(candidate.canonicalize().with_context(
-            || format!("failed to resolve local repo path {}", candidate.display()),
-        )?));
+        return Ok(ResolvedRepoSpec::LocalPath(
+            candidate.canonicalize().with_context(|| {
+                format!("failed to resolve local repo path {}", candidate.display())
+            })?,
+        ));
     }
 
     if repo.matches('/').count() == 1 {
@@ -249,7 +256,10 @@ fn clone_or_refresh_remote(
     let ssh_command = ssh_command(ssh_config)?;
     if !repo_path.exists() {
         let mut command = Command::new("git");
-        command.args(["clone", remote]).arg(repo_path).current_dir(project_root);
+        command
+            .args(["clone", remote])
+            .arg(repo_path)
+            .current_dir(project_root);
         if let Some(ssh_command) = &ssh_command {
             command.env("GIT_SSH_COMMAND", ssh_command);
         }
@@ -289,10 +299,18 @@ fn clone_or_refresh_remote(
     Ok((repo_path.to_path_buf(), resolved.trim().to_string()))
 }
 
-fn resolve_checkout_revision(repo_path: &Path, rev: &str, ssh_command: Option<&str>) -> Result<String> {
+fn resolve_checkout_revision(
+    repo_path: &Path,
+    rev: &str,
+    ssh_command: Option<&str>,
+) -> Result<String> {
     if rev != "HEAD" {
         let remote_ref = format!("refs/remotes/origin/{rev}");
-        if let Ok(resolved) = run_git_with_env(repo_path, ["rev-parse", "--verify", &remote_ref], ssh_command) {
+        if let Ok(resolved) = run_git_with_env(
+            repo_path,
+            ["rev-parse", "--verify", &remote_ref],
+            ssh_command,
+        ) {
             return Ok(resolved);
         }
     }
@@ -432,7 +450,10 @@ mod tests {
         run_git(&worktree, ["init", "-b", "master"])?;
         run_git(&worktree, ["config", "user.email", "test@example.com"])?;
         run_git(&worktree, ["config", "user.name", "Test User"])?;
-        run_git(&worktree, ["remote", "add", "origin", remote.to_str().unwrap()])?;
+        run_git(
+            &worktree,
+            ["remote", "add", "origin", remote.to_str().unwrap()],
+        )?;
         let first = commit_file(&worktree, "ply-package.toml", "name = \"fixture\"\n")?;
         run_git(&worktree, ["push", "origin", "master"])?;
 

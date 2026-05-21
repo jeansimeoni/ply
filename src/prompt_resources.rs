@@ -95,8 +95,7 @@ pub fn parse_prompt_resource(
         shared.name = take_string(&mut map, &["name"])?;
         shared.description = take_string(&mut map, &["description"])?;
         shared.category = take_string(&mut map, &["category"])?;
-        shared.argument_hint =
-            take_inline_string(&mut map, &["argument-hint", "argument_hint"])?;
+        shared.argument_hint = take_inline_string(&mut map, &["argument-hint", "argument_hint"])?;
         shared.keep_coding_instructions = take_bool(
             &mut map,
             &["keep-coding-instructions", "keep_coding_instructions"],
@@ -109,15 +108,11 @@ pub fn parse_prompt_resource(
                 take_inline_string(&mut section, &["argument-hint", "argument_hint"])?;
             claude.disable_model_invocation = take_bool(
                 &mut section,
-                &[
-                    "disable-model-invocation",
-                    "disable_model_invocation",
-                ],
+                &["disable-model-invocation", "disable_model_invocation"],
             )?;
             claude.context = take_string(&mut section, &["context"])?;
             claude.agent = take_string(&mut section, &["agent"])?;
-            claude.user_invocable =
-                take_bool(&mut section, &["user-invocable", "user_invocable"])?;
+            claude.user_invocable = take_bool(&mut section, &["user-invocable", "user_invocable"])?;
             claude.disallowed_tools =
                 take_string_list(&mut section, &["disallowedTools", "disallowed_tools"])?;
             claude.mcp_servers = take_value(&mut section, &["mcpServers", "mcp_servers"])?;
@@ -156,7 +151,10 @@ pub fn parse_prompt_resource(
 pub fn render_claude_markdown(kind: AssetKind, resource: &ParsedPromptResource) -> Result<String> {
     let mut map = Mapping::new();
     if let Some(name) = &resource.shared.name {
-        map.insert(Value::String("name".to_string()), Value::String(name.clone()));
+        map.insert(
+            Value::String("name".to_string()),
+            Value::String(name.clone()),
+        );
     }
     if let Some(description) = &resource.shared.description {
         map.insert(
@@ -235,10 +233,7 @@ pub fn render_claude_markdown(kind: AssetKind, resource: &ParsedPromptResource) 
                 );
             }
             if let Some(mcp_servers) = &resource.claude.mcp_servers {
-                map.insert(
-                    Value::String("mcpServers".to_string()),
-                    mcp_servers.clone(),
-                );
+                map.insert(Value::String("mcpServers".to_string()), mcp_servers.clone());
             }
         }
         AssetKind::OutputStyles => {
@@ -261,7 +256,12 @@ pub fn render_claude_markdown(kind: AssetKind, resource: &ParsedPromptResource) 
                 );
             }
         }
-        _ => return Err(anyhow!("unsupported prompt resource kind `{}`", kind.as_str())),
+        _ => {
+            return Err(anyhow!(
+                "unsupported prompt resource kind `{}`",
+                kind.as_str()
+            ));
+        }
     }
 
     render_markdown_document(map, &resource.body)
@@ -455,7 +455,12 @@ fn render_markdown_document(map: Mapping, body: &str) -> Result<String> {
 }
 
 fn yaml_sequence(values: &[String]) -> Value {
-    Value::Sequence(values.iter().map(|value| Value::String(value.clone())).collect())
+    Value::Sequence(
+        values
+            .iter()
+            .map(|value| Value::String(value.clone()))
+            .collect(),
+    )
 }
 
 fn infer_description(logical_name: &str, body: &str) -> String {
@@ -491,7 +496,11 @@ fn take_string(map: &mut Mapping, keys: &[&str]) -> Result<Option<String>> {
     };
     match value {
         Value::String(value) => Ok(Some(value)),
-        other => Err(anyhow!("expected string for `{}`; got {:?}", keys[0], other)),
+        other => Err(anyhow!(
+            "expected string for `{}`; got {:?}",
+            keys[0],
+            other
+        )),
     }
 }
 
@@ -515,7 +524,11 @@ fn take_inline_string(map: &mut Mapping, keys: &[&str]) -> Result<Option<String>
                 .collect::<Result<Vec<_>>>()?
                 .join(" "),
         )),
-        other => Err(anyhow!("expected string for `{}`; got {:?}", keys[0], other)),
+        other => Err(anyhow!(
+            "expected string for `{}`; got {:?}",
+            keys[0],
+            other
+        )),
     }
 }
 
@@ -525,7 +538,11 @@ fn take_bool(map: &mut Mapping, keys: &[&str]) -> Result<Option<bool>> {
     };
     match value {
         Value::Bool(value) => Ok(Some(value)),
-        other => Err(anyhow!("expected boolean for `{}`; got {:?}", keys[0], other)),
+        other => Err(anyhow!(
+            "expected boolean for `{}`; got {:?}",
+            keys[0],
+            other
+        )),
     }
 }
 
@@ -564,7 +581,11 @@ fn take_mapping(map: &mut Mapping, keys: &[&str]) -> Result<Option<Mapping>> {
     };
     match value {
         Value::Mapping(value) => Ok(Some(value)),
-        other => Err(anyhow!("expected mapping for `{}`; got {:?}", keys[0], other)),
+        other => Err(anyhow!(
+            "expected mapping for `{}`; got {:?}",
+            keys[0],
+            other
+        )),
     }
 }
 

@@ -73,6 +73,48 @@ Notes:
 - `--yes` accepts all overwrite prompts for drifted managed exposed files.
 - A successful apply updates `ply.lock` and `.ply/state.json`.
 
+## `ply add`
+
+Add one source to `ply.toml`.
+
+```txt
+ply add --id <id> --path <path>
+ply add --id <id> --git <repo> [--rev <rev>]
+```
+
+Notes:
+
+- exactly one of `--path` or `--git` is required
+- `--rev` is only valid with `--git`
+- adding a Git source also refreshes `ply.lock`
+
+## `ply remove`
+
+Remove one source from `ply.toml`.
+
+```txt
+ply remove <source-id> [--force]
+```
+
+Notes:
+
+- `--force` is reserved for future compatibility
+- successful removal prunes the matching `ply.lock` entry if present
+
+## `ply update`
+
+Refresh Git sources and rewrite `ply.lock`.
+
+```txt
+ply update [source-id]
+```
+
+Notes:
+
+- without a `source-id`, all configured Git sources are refreshed
+- with a `source-id`, that source must resolve to a Git source
+- `ply update` does not run `ply apply`
+
 ## `ply diff`
 
 Show differences between current managed outputs and the current desired state.

@@ -84,12 +84,16 @@ impl AdapterKind {
 
     pub fn direct_asset_root(self, project_root: &Path, kind: AssetKind) -> Option<PathBuf> {
         match (self, kind) {
-            (Self::Codex, AssetKind::Commands) => Some(project_root.join(".agents").join("commands")),
+            (Self::Codex, AssetKind::Commands) => {
+                Some(project_root.join(".agents").join("commands"))
+            }
             (Self::Codex, AssetKind::Skills) => Some(project_root.join(".agents").join("skills")),
             (Self::Codex, AssetKind::Agents) => Some(project_root.join(".codex").join("agents")),
             (Self::Codex, AssetKind::Rules) => Some(project_root.join(".codex").join("rules")),
             (Self::Codex, AssetKind::Hooks) => Some(project_root.join(".codex").join("hooks")),
-            (Self::Claude, AssetKind::Commands) => Some(project_root.join(".claude").join("commands")),
+            (Self::Claude, AssetKind::Commands) => {
+                Some(project_root.join(".claude").join("commands"))
+            }
             (Self::Claude, AssetKind::Skills) => Some(project_root.join(".claude").join("skills")),
             (Self::Claude, AssetKind::Agents) => Some(project_root.join(".claude").join("agents")),
             (Self::Claude, AssetKind::Rules) => Some(project_root.join(".claude").join("rules")),
@@ -107,11 +111,12 @@ impl AdapterKind {
                 Some(project_root.join("CLAUDE.local.md"))
             }
             (Self::Codex, AssetKind::LocalInstructions)
-            | (Self::Codex, AssetKind::OutputStyles) => Some(project_root.join("AGENTS.override.md")),
+            | (Self::Codex, AssetKind::OutputStyles) => {
+                Some(project_root.join("AGENTS.override.md"))
+            }
             _ => None,
         }
     }
-
 }
 
 impl AssetKind {

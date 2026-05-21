@@ -33,6 +33,7 @@ Important fields:
 - `[install].mode`: only `"copy"` is implemented
 - `[install].use_global`: defaults to `true`
 - `[[sources]]`: the package roots to consume
+- each source points at exactly one package root
 
 ### `ply.local.toml`
 
@@ -70,7 +71,7 @@ Supported fields:
 
 ### `ply.lock`
 
-Written by `ply apply`.
+Written by `ply apply` and `ply update`.
 
 This lockfile records the resolved source identifier, source kind, and resolved
 revision that was applied.

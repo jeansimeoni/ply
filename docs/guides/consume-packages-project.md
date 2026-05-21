@@ -80,6 +80,16 @@ Important points:
 
 Ply supports `path` and `git` sources.
 
+Normal workflow:
+
+```bash
+ply add --id local --path ./ply-packages/example-review
+ply add --id team --git owner/ply-team --rev main
+```
+
+The examples below show the equivalent manifest shape written into
+`ply.toml`.
+
 Local path source:
 
 ```toml
@@ -124,6 +134,12 @@ rev = "v1.2.0"
 For Git sources that point at a local repo path, Ply currently supports
 `rev = "HEAD"` or no `rev`.
 
+To remove a source later:
+
+```bash
+ply remove team
+```
+
 ## Apply managed assets
 
 Preview the composition first:
@@ -154,6 +170,13 @@ Successful `apply` also updates:
 - `ply.lock` with resolved source revisions
 - `.ply/state.json` with the set of files Ply currently owns
 - `.ply/generated/` with deterministic generated outputs
+
+To refresh Git source revisions without applying managed assets:
+
+```bash
+ply update
+ply update team
+```
 
 ## Verify the result
 
