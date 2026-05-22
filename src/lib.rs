@@ -11,7 +11,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::InitOptions;
 use ops::{
     AddSourceLocation, AddSourceRequest, AddSourceSshMode, ApplyOptions, CleanOptions,
-    CommandTarget, InitRequest, PackageInitRequest, RemoveSourceRequest, UpdateSourcesRequest,
+    CommandTarget, InitRequest, PackageDoctorRequest, PackageGetRequest, PackageInitRequest,
+    PackageSetRequest, RemoveSourceRequest, UpdateSourcesRequest,
 };
 use std::env;
 use std::path::Path;
@@ -126,7 +127,26 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
             };
             ui::print_stdout(tone, "Diff report", body);
         }
-        Command::Doctor(target) => {
+        Command::Doctor(DoctorCommand {
+            command: Some(DoctorSubcommand::Package(options)),
+            ..
+        }) => {
+            let report = ops::doctor_package(project_root, options.resolve(project_root)?)?;
+            ui::print_stdout(Tone::Success, "Package doctor report", &report.body);
+        }
+        Command::Package(PackageCommand {
+            command: PackageSubcommand::Get(options),
+        }) => {
+            let body = ops::get_package_metadata(project_root, options.resolve(project_root)?)?;
+            ui::print_stdout(Tone::Info, "Package metadata", &body);
+        }
+        Command::Package(PackageCommand {
+            command: PackageSubcommand::Set(options),
+        }) => {
+            let body = ops::set_package_metadata(project_root, options.resolve(project_root)?)?;
+            ui::print_stdout(Tone::Success, "Updated package metadata", &body);
+        }
+        Command::Doctor(DoctorCommand { target, .. }) => {
             let summary = ops::doctor(project_root, command_target(target.global))?;
             ui::print_stdout(Tone::Info, "Doctor report", &summary);
         }
@@ -298,12 +318,14 @@ enum Command {
     Apply(ApplyCli),
     #[command(about = "show managed content drift with layer origin context")]
     Diff,
-    #[command(about = "validate manifest, sources, package roots, and git safety")]
-    Doctor(TargetCli),
+    #[command(about = "validate manifests, package roots, and local safety checks")]
+    Doctor(DoctorCommand),
     #[command(about = "show resolved package roots")]
     List(TargetCli),
     #[command(about = "show configured sources and pinned revisions")]
     Sources(TargetCli),
+    #[command(about = "read or update package metadata")]
+    Package(PackageCommand),
     #[command(about = "show supported adapters")]
     Adapters,
     #[command(about = "add a source to ply.toml")]
@@ -327,6 +349,20 @@ struct InitCommand {
     command: Option<InitSubcommand>,
     #[command(flatten)]
     options: InitCli,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct DoctorCommand {
+    #[command(subcommand)]
+    command: Option<DoctorSubcommand>,
+    #[command(flatten)]
+    target: TargetCli,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum DoctorSubcommand {
+    #[command(name = "package", about = "validate one reusable package root")]
+    Package(DoctorPackageCli),
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -453,6 +489,43 @@ struct HelpCli {
     topic: Option<HelpTopic>,
 }
 
+#[derive(Debug, Clone, Args, Default)]
+struct DoctorPackageCli {
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long)]
+    fix: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PackageCommand {
+    #[command(subcommand)]
+    command: PackageSubcommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum PackageSubcommand {
+    #[command(name = "get", about = "read package metadata from ply-package.toml")]
+    Get(PackageGetCli),
+    #[command(name = "set", about = "update one package metadata field")]
+    Set(PackageSetCli),
+}
+
+#[derive(Debug, Clone, Args, Default)]
+struct PackageGetCli {
+    #[arg(long)]
+    path: Option<String>,
+    key: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct PackageSetCli {
+    #[arg(long)]
+    path: Option<String>,
+    key: String,
+    value: String,
+}
+
 impl InitCli {
     fn resolve(self) -> Result<InitRequest> {
         let scaffold_local_packages = if self.with_packages {
@@ -553,11 +626,54 @@ impl From<ApplyCli> for ApplyOptions {
     }
 }
 
+impl DoctorPackageCli {
+    fn resolve(self, project_root: &Path) -> Result<PackageDoctorRequest> {
+        Ok(PackageDoctorRequest {
+            path: self
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| project_root.to_path_buf()),
+            fix: self.fix,
+        })
+    }
+}
+
+impl PackageGetCli {
+    fn resolve(self, project_root: &Path) -> Result<PackageGetRequest> {
+        Ok(PackageGetRequest {
+            path: self
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| project_root.to_path_buf()),
+            key: self.key,
+        })
+    }
+}
+
+impl PackageSetCli {
+    fn resolve(self, project_root: &Path) -> Result<PackageSetRequest> {
+        Ok(PackageSetRequest {
+            path: self
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| project_root.to_path_buf()),
+            key: self.key,
+            value: self.value,
+        })
+    }
+}
+
 impl Command {
     fn init_target(&self) -> Option<CommandTarget> {
         match self {
             Self::Apply(_) | Self::Diff => Some(CommandTarget::Project),
-            Self::Doctor(target) => (!target.global).then_some(CommandTarget::Project),
+            Self::Doctor(command) => {
+                if command.command.is_none() && !command.target.global {
+                    Some(CommandTarget::Project)
+                } else {
+                    None
+                }
+            }
             Self::List(target) => (!target.global).then_some(CommandTarget::Project),
             Self::Sources(target) => (!target.global).then_some(CommandTarget::Project),
             Self::Add(options) => Some(command_target(options.global)),
@@ -660,7 +776,10 @@ mod tests {
                 yes: false,
             }),
             Command::Diff,
-            Command::Doctor(TargetCli { global: false }),
+            Command::Doctor(DoctorCommand {
+                command: None,
+                target: TargetCli { global: false },
+            }),
             Command::List(TargetCli { global: false }),
             Command::Sources(TargetCli { global: false }),
             Command::Add(AddCli {
@@ -721,6 +840,72 @@ mod tests {
                 assert!(options.dry_run);
             }
             other => panic!("expected clean command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_doctor_package_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "doctor".to_string(),
+            "package".to_string(),
+            "--path".to_string(),
+            "./packages/review-tools".to_string(),
+            "--fix".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Doctor(DoctorCommand {
+                command: Some(DoctorSubcommand::Package(options)),
+                ..
+            }) => {
+                assert_eq!(options.path.as_deref(), Some("./packages/review-tools"));
+                assert!(options.fix);
+            }
+            other => panic!("expected doctor package command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_package_get_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "package".to_string(),
+            "get".to_string(),
+            "--path".to_string(),
+            "./packages/review-tools".to_string(),
+            "name".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Package(PackageCommand {
+                command: PackageSubcommand::Get(options),
+            }) => {
+                assert_eq!(options.path.as_deref(), Some("./packages/review-tools"));
+                assert_eq!(options.key.as_deref(), Some("name"));
+            }
+            other => panic!("expected package get command, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_package_set_flags() -> Result<()> {
+        let cli = Cli::parse(vec![
+            "package".to_string(),
+            "set".to_string(),
+            "license".to_string(),
+            "MIT".to_string(),
+        ])?
+        .expect("cli should parse");
+        match cli.command.expect("command should be present") {
+            Command::Package(PackageCommand {
+                command: PackageSubcommand::Set(options),
+            }) => {
+                assert_eq!(options.key, "license");
+                assert_eq!(options.value, "MIT");
+            }
+            other => panic!("expected package set command, got {other:?}"),
         }
         Ok(())
     }

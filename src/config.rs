@@ -411,18 +411,42 @@ pub fn write_package_manifest(package_root: &Path, name: &str) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    let content = format!("name = \"{name}\"\n");
-    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+    write_package_manifest_contents(
+        package_root,
+        &PackageManifest {
+            name: name.to_string(),
+            version: None,
+            description: None,
+            license: None,
+            targets: Vec::new(),
+        },
+    )
 }
 
 pub fn load_package_manifest(package_root: &Path) -> Result<PackageManifest> {
+    let manifest = load_package_manifest_for_edit(package_root)?;
+    validate_package_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+pub fn load_package_manifest_for_edit(package_root: &Path) -> Result<PackageManifest> {
     let path = package_root.join("ply-package.toml");
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let manifest: PackageManifest =
         toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
-    validate_package_manifest(&manifest)?;
     Ok(manifest)
+}
+
+pub fn write_package_manifest_contents(
+    package_root: &Path,
+    manifest: &PackageManifest,
+) -> Result<()> {
+    validate_package_manifest(manifest)?;
+    fs::create_dir_all(package_root)?;
+    let path = package_root.join("ply-package.toml");
+    let content = toml::to_string_pretty(manifest)?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
 pub fn validate_package_manifest(manifest: &PackageManifest) -> Result<()> {

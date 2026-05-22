@@ -10,7 +10,8 @@ use crate::config::{
     Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, SourceConfig, SshConfigFile,
     SshSourceConfig, State, load_local_manifest_if_present, load_local_overlays,
     load_lockfile_if_present, load_manifest, load_manifest_for_edit, load_manifest_if_present,
-    load_package_manifest, load_ssh_config_for_edit, load_ssh_config_if_present, load_state,
+    load_package_manifest, load_package_manifest_for_edit, load_ssh_config_for_edit,
+    load_ssh_config_if_present, load_state,
 };
 use crate::git;
 use crate::prompt_resources::{
@@ -214,6 +215,30 @@ pub struct PackageInitReport {
 }
 
 #[derive(Debug, Clone)]
+pub struct PackageDoctorRequest {
+    pub path: PathBuf,
+    pub fix: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageDoctorReport {
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageGetRequest {
+    pub path: PathBuf,
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageSetRequest {
+    pub path: PathBuf,
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApplyReport {
     pub body: String,
     pub dry_run: bool,
@@ -348,6 +373,273 @@ pub fn init_package(project_root: &Path, request: PackageInitRequest) -> Result<
         created_paths,
         dry_run: request.dry_run,
     })
+}
+
+pub fn doctor_package(
+    project_root: &Path,
+    request: PackageDoctorRequest,
+) -> Result<PackageDoctorReport> {
+    let package_root = if request.path.is_absolute() {
+        request.path.clone()
+    } else {
+        project_root.join(&request.path)
+    };
+
+    let mut healthy = Vec::new();
+    let mut applied = Vec::new();
+    let mut suggestions = Vec::new();
+
+    if request.fix && !package_root.exists() {
+        fs::create_dir_all(&package_root)?;
+        applied.push(ui::list_item(&format!(
+            "created package root {}",
+            package_root.display()
+        )));
+    }
+
+    if !package_root.exists() {
+        return Err(anyhow!(
+            "{}",
+            render_report_sections(&[
+                (
+                    "Issues",
+                    vec![ui::status_line(
+                        Tone::Error,
+                        &format!("package root {} does not exist", package_root.display()),
+                    )],
+                ),
+                ("Suggested fixes", suggestions),
+            ])
+        ));
+    }
+
+    if request.fix && !package_root.join("ply-package.toml").exists() {
+        let package_name = prompt_required_package_name(&package_root)?;
+        config::write_package_manifest(&package_root, &package_name)?;
+        applied.push(ui::list_item("created ply-package.toml"));
+    } else if !package_root.join("ply-package.toml").exists() {
+        suggestions.push(ui::list_item(
+            "run `ply doctor package --fix` to create ply-package.toml interactively",
+        ));
+    }
+
+    healthy.push(ui::status_line(
+        Tone::Success,
+        &format!("package root {}", package_root.display()),
+    ));
+
+    let manifest_path = package_root.join("ply-package.toml");
+    let manifest = match load_package_manifest(&package_root) {
+        Ok(manifest) => {
+            healthy.push(ui::status_line(Tone::Success, "ply-package.toml parsed"));
+            manifest
+        }
+        Err(err) => {
+            if request.fix {
+                let mut editable =
+                    load_package_manifest_for_edit(&package_root).map_err(|_| err)?;
+                let changed = repair_package_manifest_interactively(&package_root, &mut editable)?;
+                if changed {
+                    config::write_package_manifest_contents(&package_root, &editable)?;
+                    applied.push(ui::list_item("updated ply-package.toml interactively"));
+                }
+                match load_package_manifest(&package_root) {
+                    Ok(manifest) => {
+                        healthy.push(ui::status_line(Tone::Success, "ply-package.toml parsed"));
+                        manifest
+                    }
+                    Err(err) => {
+                        let issue_lines = vec![
+                            ui::status_line(
+                                Tone::Error,
+                                &format!("failed to load {}", manifest_path.display()),
+                            ),
+                            ui::list_item(&err.to_string()),
+                        ];
+                        suggestions.push(ui::list_item(
+                            "repair ply-package.toml manually, then rerun `ply doctor package`",
+                        ));
+                        return Err(anyhow!(
+                            "{}",
+                            render_report_sections(&[
+                                ("Applied fixes", applied),
+                                ("Healthy checks", healthy),
+                                ("Issues", issue_lines),
+                                ("Suggested fixes", suggestions),
+                            ])
+                        ));
+                    }
+                }
+            } else {
+                let issue_lines = vec![
+                    ui::status_line(
+                        Tone::Error,
+                        &format!("failed to load {}", manifest_path.display()),
+                    ),
+                    ui::list_item(&err.to_string()),
+                ];
+                suggestions.push(ui::list_item(
+                    "run `ply doctor package --fix` to repair supported metadata issues interactively",
+                ));
+                suggestions.push(ui::list_item(
+                    "if ply-package.toml has TOML syntax errors, repair it manually first",
+                ));
+                return Err(anyhow!(
+                    "{}",
+                    render_report_sections(&[
+                        ("Applied fixes", applied),
+                        ("Healthy checks", healthy),
+                        ("Issues", issue_lines),
+                        ("Suggested fixes", suggestions),
+                    ])
+                ));
+            }
+        }
+    };
+
+    healthy.push(ui::status_line(
+        Tone::Success,
+        &format!("package name `{}`", manifest.name),
+    ));
+    if let Some(version) = manifest.version.as_deref() {
+        healthy.push(ui::status_line(
+            Tone::Success,
+            &format!("version `{version}` is valid"),
+        ));
+    } else {
+        suggestions.push(ui::list_item(
+            "consider adding `version` to ply-package.toml when you want publishable package metadata",
+        ));
+    }
+    if manifest.description.is_none() {
+        suggestions.push(ui::list_item(
+            "consider adding `description` to ply-package.toml for package discovery",
+        ));
+    }
+    if manifest.license.is_none() {
+        suggestions.push(ui::list_item(
+            "consider adding `license` to ply-package.toml if the package will be shared",
+        ));
+    }
+
+    let mut issue_lines = Vec::new();
+    if let Err(err) = validate_package_root(&package_root, &manifest) {
+        if request.fix
+            && err
+                .to_string()
+                .contains("does not expose any supported managed assets")
+        {
+            let kinds = prompt_package_kinds()?;
+            for kind in kinds {
+                let path = package_asset_root(&package_root, kind);
+                if path.exists() {
+                    continue;
+                }
+                scaffold_package_kind(&package_root, kind)?;
+                applied.push(ui::list_item(&format!("created {}", path.display())));
+            }
+            validate_package_root(&package_root, &manifest)?;
+            healthy.push(ui::status_line(
+                Tone::Success,
+                "package root passed structure checks",
+            ));
+        } else {
+            issue_lines.push(ui::status_line(Tone::Error, &err.to_string()));
+            issue_lines.extend(package_fix_hints(&err.to_string(), request.fix));
+        }
+    } else {
+        healthy.push(ui::status_line(
+            Tone::Success,
+            "package root passed structure checks",
+        ));
+    }
+
+    if issue_lines.is_empty() {
+        let resolved_package = ResolvedPackage {
+            source_id: "package".to_string(),
+            source_layer: LayerKind::Project,
+            root: package_root.clone(),
+            manifest: manifest.clone(),
+        };
+        let adapters = vec!["codex".to_string(), "claude".to_string()];
+        match build_plan(package_root.as_path(), &adapters, &[resolved_package], &[]) {
+            Ok(planned_files) => {
+                healthy.push(ui::status_line(
+                    Tone::Success,
+                    &format!(
+                        "{} managed file(s) planned for supported adapters",
+                        planned_files.len()
+                    ),
+                ));
+            }
+            Err(err) => {
+                issue_lines.push(ui::status_line(Tone::Error, &err.to_string()));
+            }
+        }
+    }
+
+    if !issue_lines.is_empty() {
+        return Err(anyhow!(
+            "{}",
+            render_report_sections(&[
+                ("Applied fixes", applied),
+                ("Healthy checks", healthy),
+                ("Issues", issue_lines),
+                ("Suggested fixes", suggestions),
+            ])
+        ));
+    }
+
+    Ok(PackageDoctorReport {
+        body: render_report_sections(&[
+            ("Applied fixes", applied),
+            ("Healthy checks", healthy),
+            ("Suggested fixes", suggestions),
+        ]),
+    })
+}
+
+pub fn get_package_metadata(project_root: &Path, request: PackageGetRequest) -> Result<String> {
+    let package_root = if request.path.is_absolute() {
+        request.path.clone()
+    } else {
+        project_root.join(&request.path)
+    };
+    let manifest = load_package_manifest_for_edit(&package_root)?;
+    match request.key.as_deref() {
+        None => Ok(render_package_metadata(&manifest)),
+        Some("name") => Ok(manifest.name),
+        Some("version") => Ok(optional_string(manifest.version)),
+        Some("description") => Ok(optional_string(manifest.description)),
+        Some("license") => Ok(optional_string(manifest.license)),
+        Some("targets") => Ok(render_targets(&manifest.targets)),
+        Some(other) => Err(anyhow!(
+            "unsupported package metadata key `{other}`; use one of name, version, description, license, targets"
+        )),
+    }
+}
+
+pub fn set_package_metadata(project_root: &Path, request: PackageSetRequest) -> Result<String> {
+    let package_root = if request.path.is_absolute() {
+        request.path.clone()
+    } else {
+        project_root.join(&request.path)
+    };
+    let mut manifest = load_package_manifest_for_edit(&package_root)?;
+    match request.key.as_str() {
+        "name" => manifest.name = request.value.trim().to_string(),
+        "version" => manifest.version = parse_optional_value(&request.value),
+        "description" => manifest.description = parse_optional_value(&request.value),
+        "license" => manifest.license = parse_optional_value(&request.value),
+        "targets" => manifest.targets = parse_targets_value(&request.value),
+        other => {
+            return Err(anyhow!(
+                "unsupported package metadata key `{other}`; use one of name, version, description, license, targets"
+            ));
+        }
+    }
+    config::write_package_manifest_contents(&package_root, &manifest)?;
+    Ok(render_package_metadata(&manifest))
 }
 
 pub fn add_source(
@@ -560,6 +852,197 @@ fn locked_source_matches_config(locked: &LockedSource, source: &SourceConfig) ->
         "git" => locked.repo == source.repo.clone().or_else(|| source.url.clone()),
         _ => false,
     }
+}
+
+fn default_package_name(package_root: &Path) -> String {
+    package_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("package")
+        .to_string()
+}
+
+fn package_asset_root(package_root: &Path, kind: AssetKind) -> PathBuf {
+    match kind {
+        AssetKind::LocalInstructions => package_root.join("local-instructions.md"),
+        _ => package_root.join(kind.as_str()),
+    }
+}
+
+fn scaffold_package_kind(package_root: &Path, kind: AssetKind) -> Result<()> {
+    let target = package_asset_root(package_root, kind);
+    if kind.is_directory_based() {
+        fs::create_dir_all(target)?;
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if !target.exists() {
+            fs::write(target, "")?;
+        }
+    }
+    Ok(())
+}
+
+fn package_fix_hints(error: &str, fix_mode: bool) -> Vec<String> {
+    let mut hints = Vec::new();
+    if error.contains("does not expose any supported managed assets") {
+        if fix_mode {
+            hints.push(ui::list_item(
+                "answer the scaffold prompt to create supported asset roots",
+            ));
+        } else {
+            hints.push(ui::list_item(
+                "run `ply doctor package --fix` to scaffold supported asset roots interactively",
+            ));
+        }
+    }
+    if error.contains("contains unsupported adapter directory") {
+        hints.push(ui::list_item(
+            "move authored content into portable asset roots like `skills/`, `commands/`, or `agents/`",
+        ));
+    }
+    if error.contains("only allows [") {
+        hints.push(ui::list_item(
+            "align resource-level `targets` with the package-level `targets` declared in ply-package.toml",
+        ));
+    }
+    hints
+}
+
+fn prompt_required_package_name(package_root: &Path) -> Result<String> {
+    let default_name = default_package_name(package_root);
+    loop {
+        let value = ui::prompt_text(
+            "Package name required",
+            "Ply needs a package name to create ply-package.toml.",
+            &format!("Package name [{default_name}]: "),
+        )
+        .map_err(|err| anyhow!("failed to read package name: {err}"))?;
+        let resolved = if value.trim().is_empty() {
+            default_name.clone()
+        } else {
+            value.trim().to_string()
+        };
+        if resolved.trim().is_empty() {
+            continue;
+        }
+        return Ok(resolved);
+    }
+}
+
+fn prompt_package_kinds() -> Result<Vec<AssetKind>> {
+    loop {
+        let value = ui::prompt_text(
+            "Package assets required",
+            "This package root does not expose any supported managed assets. Choose one or more kinds to scaffold.",
+            "Kinds [skills,commands]: ",
+        )
+        .map_err(|err| anyhow!("failed to read package kinds: {err}"))?;
+        let raw = if value.trim().is_empty() {
+            "skills,commands".to_string()
+        } else {
+            value
+        };
+        let mut kinds = Vec::new();
+        let mut valid = true;
+        for item in raw.split(',') {
+            match AssetKind::parse(item.trim()) {
+                Ok(kind) => kinds.push(kind),
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if valid && !kinds.is_empty() {
+            return Ok(kinds);
+        }
+    }
+}
+
+fn repair_package_manifest_interactively(
+    package_root: &Path,
+    manifest: &mut PackageManifest,
+) -> Result<bool> {
+    let mut changed = false;
+    if manifest.name.trim().is_empty() {
+        manifest.name = prompt_required_package_name(package_root)?;
+        changed = true;
+    }
+    if let Some(version) = manifest.version.clone() {
+        if semver::Version::parse(&version).is_err() {
+            let input = ui::prompt_text(
+                "Package version is invalid",
+                &format!("Current version `{version}` is not valid semver. Enter a new version or leave empty to clear it."),
+                "Version: ",
+            )
+            .map_err(|err| anyhow!("failed to read package version: {err}"))?;
+            manifest.version = parse_optional_value(&input);
+            changed = true;
+        }
+    }
+    let invalid_targets = manifest
+        .targets
+        .iter()
+        .any(|target| AdapterKind::parse(target).is_err());
+    if invalid_targets {
+        let input = ui::prompt_text(
+            "Package targets are invalid",
+            "Targets must be a comma-separated subset of codex,claude. Leave empty to clear targets.",
+            "Targets: ",
+        )
+        .map_err(|err| anyhow!("failed to read package targets: {err}"))?;
+        manifest.targets = parse_targets_value(&input);
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn parse_optional_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn parse_targets_value(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+        .collect()
+}
+
+fn optional_string(value: Option<String>) -> String {
+    value.unwrap_or_default()
+}
+
+fn render_targets(targets: &[String]) -> String {
+    if targets.is_empty() {
+        String::new()
+    } else {
+        targets.join(",")
+    }
+}
+
+fn render_package_metadata(manifest: &PackageManifest) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("name={}", manifest.name));
+    lines.push(format!(
+        "version={}",
+        optional_string(manifest.version.clone())
+    ));
+    lines.push(format!(
+        "description={}",
+        optional_string(manifest.description.clone())
+    ));
+    lines.push(format!(
+        "license={}",
+        optional_string(manifest.license.clone())
+    ));
+    lines.push(format!("targets={}", render_targets(&manifest.targets)));
+    lines.join("\n")
 }
 
 fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> Result<()> {
@@ -4463,6 +4946,66 @@ Use short, direct responses.
         let report = doctor(temp.path(), CommandTarget::Project)?;
         assert!(report.contains("Warnings:"));
         assert!(report.contains("missing Ply block in .git/info/exclude"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_package_reports_missing_manifest_fix() -> Result<()> {
+        let temp = TempDir::new()?;
+        let package_root = temp.path().join("review-tools");
+        fs::create_dir_all(&package_root)?;
+
+        let err = doctor_package(
+            temp.path(),
+            PackageDoctorRequest {
+                path: package_root.clone(),
+                fix: false,
+            },
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("failed to load"));
+        assert!(message.contains("doctor package --fix"));
+        Ok(())
+    }
+
+    #[test]
+    fn get_and_set_package_metadata_round_trip() -> Result<()> {
+        let temp = TempDir::new()?;
+        let package_root = temp.path().join("review-tools");
+        fs::create_dir_all(package_root.join("skills"))?;
+        config::write_package_manifest(&package_root, "review-tools")?;
+        write(&package_root.join("skills").join("SKILL.md"), "# ignored\n")?;
+
+        let updated = set_package_metadata(
+            temp.path(),
+            PackageSetRequest {
+                path: package_root.clone(),
+                key: "license".to_string(),
+                value: "MIT".to_string(),
+            },
+        )?;
+        assert!(updated.contains("license=MIT"));
+
+        let license = get_package_metadata(
+            temp.path(),
+            PackageGetRequest {
+                path: package_root.clone(),
+                key: Some("license".to_string()),
+            },
+        )?;
+        assert_eq!(license, "MIT");
+
+        let all = get_package_metadata(
+            temp.path(),
+            PackageGetRequest {
+                path: package_root,
+                key: None,
+            },
+        )?;
+        assert!(all.contains("name=review-tools"));
+        assert!(all.contains("license=MIT"));
         Ok(())
     }
 }

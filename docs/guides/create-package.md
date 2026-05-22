@@ -149,6 +149,26 @@ ply diff
 
 This verifies both package structure and rendered adapter output.
 
+You can also validate the package root directly while authoring:
+
+```bash
+ply doctor package
+ply doctor package --fix
+```
+
+Use `ply doctor package` for a direct package-health check. Add `--fix` when
+you want Ply to prompt for missing required metadata and safely scaffold
+missing top-level asset roots.
+
+For explicit metadata edits after that, use:
+
+```bash
+ply package get
+ply package get name
+ply package set license MIT
+ply package set targets codex,claude
+```
+
 Validation also rejects package roots that contain adapter-owned directories
 such as `.claude/`, `.agents/`, or `.codex/`. Author package content in the
 portable package asset kinds instead.

@@ -78,6 +78,18 @@ Fix:
 - add at least one supported managed asset kind
 - if you just ran `ply init package` without `--kinds`, add package content
   before consuming that package from a source
+- or run `ply doctor package --fix` and answer the scaffold prompt
+
+## `ply doctor package` reports a missing `ply-package.toml`
+
+Cause:
+
+- the package root has not been initialized yet
+
+Fix:
+
+- run `ply doctor package --fix`
+- answer the prompts for the package name and any safe scaffolding choices
 
 ## Unsupported source or adapter
 

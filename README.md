@@ -57,6 +57,9 @@ The current MVP supports:
 - `ply apply`
 - `ply diff`
 - `ply doctor`
+- `ply doctor package`
+- `ply package get`
+- `ply package set`
 - `ply list`
 - `ply sources`
 - `ply adapters`
@@ -93,6 +96,7 @@ Implemented behavior:
 - generated Codex agent `.toml` files and Codex skill `agents/openai.yaml` sidecars
 - grouped drift and safety reporting in `ply diff`
 - validation of ignore coverage and state drift in `ply doctor`
+- direct package-root validation and safe package scaffolding through `ply doctor package`
 - local-only Git ignore management via `.git/info/exclude`
 - tracked-file and unmanaged-file collision checks
 - destructive cleanup flow with confirmation

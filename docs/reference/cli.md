@@ -155,6 +155,7 @@ Validate manifest, source resolution, package roots, and local safety checks.
 
 ```txt
 ply doctor [options]
+ply doctor package [options]
 ```
 
 Options:
@@ -167,6 +168,70 @@ Notes:
   `.claude/`, `.agents/`, and `.codex/` inside a package root
 - package validation rejects package roots that expose no supported managed
   assets
+
+## `ply doctor package`
+
+Validate one reusable package root directly.
+
+```txt
+ply doctor package [options]
+```
+
+Options:
+
+- `--path <dir>`
+- `--fix`
+
+Notes:
+
+- if `--path` is omitted, Ply validates the current directory
+- `--fix` prompts interactively for any missing required metadata and for safe
+  scaffolding choices such as missing top-level asset roots
+- unsupported layout or metadata errors are reported with fix hints, but only
+  the safe scaffolding cases are auto-fixed
+
+## `ply package get`
+
+Read package metadata from `ply-package.toml`.
+
+```txt
+ply package get [--path <dir>] [key]
+```
+
+Supported keys:
+
+- `name`
+- `version`
+- `description`
+- `license`
+- `targets`
+
+Notes:
+
+- if `key` is omitted, Ply prints the full metadata set as `key=value` lines
+- if `--path` is omitted, Ply reads the current directory
+
+## `ply package set`
+
+Update one package metadata field in `ply-package.toml`.
+
+```txt
+ply package set [--path <dir>] <key> <value>
+```
+
+Supported keys:
+
+- `name`
+- `version`
+- `description`
+- `license`
+- `targets`
+
+Notes:
+
+- use an empty string for optional fields when you want to clear them
+- `targets` accepts a comma-separated list such as `codex,claude`
+- writes are validated before Ply updates `ply-package.toml`
 
 ## `ply list`
 
