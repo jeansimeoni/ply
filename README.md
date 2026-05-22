@@ -48,7 +48,7 @@ layer on top.
 
 ## Notes
 
-Ply is at `v0.1.0` right now.
+Ply is at `v0.1.0-rc2` right now.
 
 The current release baseline focuses on local-first package consumption,
 package authoring, deterministic generation, and safe composition for Codex and
@@ -84,19 +84,19 @@ Supported coding-agent runtimes today:
 
 ## Installation
 
-Stable install methods are available through:
+Current prerelease install methods are available through:
 
 - GitHub Releases
 - cargo-dist shell installer
-- Homebrew
 - downloadable `.deb` and `.rpm` packages
-- Arch User Repository: `ply-bin`
 - source builds
+
+Stable package-manager publishing to Homebrew and the AUR resumes at `v0.1.0`.
 
 Install with the shell installer:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0/ply-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0-rc2/ply-installer.sh | sh
 ply -V
 ```
 

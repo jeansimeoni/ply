@@ -50,7 +50,7 @@ scripts/check-aur-packaging.sh
 ## Release Process
 
 Releases are maintainer-controlled and are published by the generated `dist`
-workflow from protected version tags such as `v0.1.0`.
+workflow from protected version tags such as `v0.1.0` or `v0.1.0-rc2`.
 
 Stable package-manager publishing is layered on top of that release flow:
 
@@ -60,7 +60,7 @@ Stable package-manager publishing is layered on top of that release flow:
 
 Before tagging a release:
 
-- ensure `Cargo.toml` has the intended version
+- ensure `Cargo.toml` has the exact version that matches the release tag
 - ensure `CHANGELOG.md` has a heading for that version
 - run the local quality gates:
 
@@ -92,11 +92,18 @@ scripts/verify-release-artifacts.sh target/distrib
 Downloadable `.deb` and `.rpm` packages are attached by the separate `Native
 Linux Packages` workflow after a GitHub Release is published.
 
-To cut the release, tag the reviewed release commit and push the tag:
+To cut a stable release, tag the reviewed release commit and push the tag:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
+```
+
+To cut a prerelease, use the matching prerelease version and tag:
+
+```bash
+git tag v0.1.0-rc2
+git push origin v0.1.0-rc2
 ```
 
 After the `Release` workflow completes, verify that the GitHub Release contains
