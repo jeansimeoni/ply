@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    name: Markdown formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check Markdown formatting
+        run: npx prettier@3 --check README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md docs/*.md docs/guides/*.md docs/reference/*.md
+
+  checks:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Check cargo-dist configuration
+        run: |
+          cargo install --locked cargo-dist --version 0.31.0
+          dist generate --check
+          dist plan
+
+      - name: Check AUR packaging generation
+        run: scripts/check-aur-packaging.sh
+
+      - name: Check native package scripts
+        run: bash -n scripts/package-linux-native-artifacts.sh scripts/verify-native-linux-packages.sh scripts/verify-release-artifacts.sh

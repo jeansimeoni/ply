@@ -1,0 +1,110 @@
+name: Native Linux Packages
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag or version to package, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package-native-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runs_on: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-musl
+            deb_arch: amd64
+            rpm_arch: x86_64
+            deb_pattern: ply_*_amd64.deb
+            rpm_pattern: ply-*.x86_64.rpm
+          - runs_on: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            deb_arch: arm64
+            rpm_arch: aarch64
+            deb_pattern: ply_*_arm64.deb
+            rpm_pattern: ply-*.aarch64.rpm
+    runs-on: ${{ matrix.runs_on }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - id: resolve
+        name: Resolve tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            tag="$(
+              git ls-remote --tags "$repo_url" \
+                | awk -v sha="${{ github.event.workflow_run.head_sha }}" '
+                    $1 == sha && $2 !~ /\^\{\}$/ {
+                      ref = $2
+                      sub(/^refs\/tags\//, "", ref)
+                      if (ref ~ /^v?[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$/) {
+                        print ref
+                      }
+                    }
+                  ' \
+                | sort -V \
+                | tail -n 1
+            )"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "No semver tag found for release workflow head ${{ github.event.workflow_run.head_sha }}" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            tag="v$tag"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download Linux release archives
+        run: |
+          mkdir -p target/distrib
+          gh release download "${{ steps.resolve.outputs.tag }}" \
+            --repo jeansimeoni/ply \
+            --dir target/distrib \
+            --pattern "ply-${{ matrix.rust_target }}.tar.xz"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Build .deb and .rpm packages
+        run: |
+          scripts/package-linux-native-artifacts.sh \
+            --version "${{ steps.resolve.outputs.tag }}" \
+            --artifact-dir target/distrib \
+            --output-dir target/distrib \
+            --target "${{ matrix.rust_target }}" \
+            --deb-arch "${{ matrix.deb_arch }}" \
+            --rpm-arch "${{ matrix.rpm_arch }}"
+
+      - name: Verify .deb and .rpm packages
+        run: |
+          scripts/verify-native-linux-packages.sh target/distrib
+
+      - name: Upload native Linux packages to release
+        shell: bash
+        run: |
+          mapfile -t rpm_files < <(find target/distrib -type f -name "${{ matrix.rpm_pattern }}" | sort)
+          mapfile -t deb_files < <(find target/distrib -maxdepth 1 -type f -name "${{ matrix.deb_pattern }}" | sort)
+          gh release upload "${{ steps.resolve.outputs.tag }}" "${deb_files[@]}" "${rpm_files[@]}" --clobber

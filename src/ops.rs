@@ -123,6 +123,20 @@ struct AssetMetadata {
     targets: Vec<String>,
 }
 
+struct PlanContext<'a> {
+    project_root: &'a Path,
+    adapter: AdapterKind,
+    kind: AssetKind,
+    origin_layer: LayerKind,
+    origin_detail: String,
+}
+
+struct PlanState<'a> {
+    plan: &'a mut Vec<PlannedFile>,
+    sections: &'a mut Vec<CompositeSection>,
+    seen: &'a mut BTreeMap<PathBuf, usize>,
+}
+
 const PLY_MANAGED_START: &str = "<!-- ply:start -->";
 const PLY_MANAGED_END: &str = "<!-- ply:end -->";
 
@@ -970,17 +984,17 @@ fn repair_package_manifest_interactively(
         manifest.name = prompt_required_package_name(package_root)?;
         changed = true;
     }
-    if let Some(version) = manifest.version.clone() {
-        if semver::Version::parse(&version).is_err() {
-            let input = ui::prompt_text(
-                "Package version is invalid",
-                &format!("Current version `{version}` is not valid semver. Enter a new version or leave empty to clear it."),
-                "Version: ",
-            )
-            .map_err(|err| anyhow!("failed to read package version: {err}"))?;
-            manifest.version = parse_optional_value(&input);
-            changed = true;
-        }
+    if let Some(version) = manifest.version.clone()
+        && semver::Version::parse(&version).is_err()
+    {
+        let input = ui::prompt_text(
+            "Package version is invalid",
+            &format!("Current version `{version}` is not valid semver. Enter a new version or leave empty to clear it."),
+            "Version: ",
+        )
+        .map_err(|err| anyhow!("failed to read package version: {err}"))?;
+        manifest.version = parse_optional_value(&input);
+        changed = true;
     }
     let invalid_targets = manifest
         .targets
@@ -1950,6 +1964,11 @@ fn build_plan(
     let mut plan = Vec::new();
     let mut seen = BTreeMap::new();
     let mut sections = Vec::new();
+    let mut state = PlanState {
+        plan: &mut plan,
+        sections: &mut sections,
+        seen: &mut seen,
+    };
 
     for adapter_name in adapter_names {
         let adapter = AdapterKind::parse(adapter_name)?;
@@ -1970,50 +1989,32 @@ fn build_plan(
                 }
                 let source_dir = package.root.join(kind.as_str());
                 if source_dir.exists() {
+                    let origin_detail = format!(
+                        "package {} from source {}",
+                        package.manifest.name, package.source_id
+                    );
+                    let context = PlanContext {
+                        project_root,
+                        adapter,
+                        kind,
+                        origin_layer: package.source_layer,
+                        origin_detail: origin_detail.clone(),
+                    };
                     if is_prompt_resource(kind) {
-                        collect_prompt_resource_plans(
-                            project_root,
-                            adapter,
-                            kind,
-                            &source_dir,
-                            package.source_layer,
-                            format!(
-                                "package {} from source {}",
-                                package.manifest.name, package.source_id
-                            ),
-                            &mut plan,
-                            &mut sections,
-                            &mut seen,
-                        )?;
+                        collect_prompt_resource_plans(&context, &source_dir, &mut state)?;
                         continue;
                     }
                     match adapter.exposure_mode(kind) {
                         ExposureMode::Direct => {
-                            let origin_detail = format!(
-                                "package {} from source {}",
-                                package.manifest.name, package.source_id
-                            );
-                            collect_planned_files(
-                                project_root,
-                                adapter,
-                                kind,
-                                &source_dir,
-                                package.source_layer,
-                                origin_detail.clone(),
-                                &mut plan,
-                                &mut seen,
-                            )?;
+                            collect_planned_files(&context, &source_dir, &mut state)?
                         }
                         ExposureMode::GeneratedComposite => collect_directory_sections(
                             adapter,
                             kind,
                             &source_dir,
                             package.source_layer,
-                            format!(
-                                "package {} from source {}",
-                                package.manifest.name, package.source_id
-                            ),
-                            &mut sections,
+                            origin_detail,
+                            state.sections,
                         )?,
                         ExposureMode::InjectBlock => {}
                     }
@@ -2030,7 +2031,7 @@ fn build_plan(
                         "package {} from source {}",
                         package.manifest.name, package.source_id
                     ),
-                    &mut sections,
+                    state.sections,
                 )?;
             }
         }
@@ -2043,63 +2044,42 @@ fn build_plan(
         if !source_path.exists() {
             continue;
         }
+        let origin_detail = format!("overlay {}", overlay.entry.path);
+        let context = PlanContext {
+            project_root,
+            adapter,
+            kind,
+            origin_layer: overlay.layer,
+            origin_detail: origin_detail.clone(),
+        };
         if kind.is_directory_based() {
             if is_prompt_resource(kind) {
-                collect_prompt_resource_plans(
-                    project_root,
-                    adapter,
-                    kind,
-                    &source_path,
-                    overlay.layer,
-                    format!("overlay {}", overlay.entry.path),
-                    &mut plan,
-                    &mut sections,
-                    &mut seen,
-                )?;
+                collect_prompt_resource_plans(&context, &source_path, &mut state)?;
                 continue;
             }
             match adapter.exposure_mode(kind) {
-                ExposureMode::Direct => collect_planned_files(
-                    project_root,
-                    adapter,
-                    kind,
-                    &source_path,
-                    overlay.layer,
-                    format!("overlay {}", overlay.entry.path),
-                    &mut plan,
-                    &mut seen,
-                )?,
+                ExposureMode::Direct => collect_planned_files(&context, &source_path, &mut state)?,
                 ExposureMode::GeneratedComposite => collect_directory_sections(
                     adapter,
                     kind,
                     &source_path,
                     overlay.layer,
-                    format!("overlay {}", overlay.entry.path),
-                    &mut sections,
+                    origin_detail,
+                    state.sections,
                 )?,
                 ExposureMode::InjectBlock => {}
             }
         } else {
             if is_prompt_resource(kind) {
-                collect_prompt_document_plan(
-                    project_root,
-                    adapter,
-                    kind,
-                    &source_path,
-                    overlay.layer,
-                    format!("overlay {}", overlay.entry.path),
-                    &mut plan,
-                    &mut sections,
-                    &mut seen,
-                )?;
+                collect_prompt_document_plan(&context, &source_path, &mut state)?;
             } else {
                 collect_document_section(
                     adapter,
                     kind,
                     &source_path,
                     overlay.layer,
-                    format!("overlay {}", overlay.entry.path),
-                    &mut sections,
+                    origin_detail,
+                    state.sections,
                 )?;
             }
         }
@@ -2201,34 +2181,18 @@ fn append_managed_file_plans(
 }
 
 fn collect_prompt_resource_plans(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
     source_dir: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    sections: &mut Vec<CompositeSection>,
-    seen: &mut BTreeMap<PathBuf, usize>,
+    state: &mut PlanState<'_>,
 ) -> Result<()> {
-    match kind {
+    match context.kind {
         AssetKind::Commands | AssetKind::OutputStyles => {
             for entry in fs::read_dir(source_dir)? {
                 let entry = entry?;
                 if !entry.file_type()?.is_file() || is_asset_metadata_file(&entry.path()) {
                     continue;
                 }
-                collect_prompt_document_plan(
-                    project_root,
-                    adapter,
-                    kind,
-                    &entry.path(),
-                    origin_layer,
-                    origin_detail.clone(),
-                    plan,
-                    sections,
-                    seen,
-                )?;
+                collect_prompt_document_plan(context, &entry.path(), state)?;
             }
             Ok(())
         }
@@ -2238,66 +2202,45 @@ fn collect_prompt_resource_plans(
                 if !entry.file_type()?.is_dir() {
                     continue;
                 }
-                collect_prompt_directory_plan(
-                    project_root,
-                    adapter,
-                    kind,
-                    &entry.path(),
-                    origin_layer,
-                    origin_detail.clone(),
-                    plan,
-                    sections,
-                    seen,
-                )?;
+                collect_prompt_directory_plan(context, &entry.path(), state)?;
             }
             Ok(())
         }
         _ => Err(anyhow!(
             "unsupported prompt resource kind `{}`",
-            kind.as_str()
+            context.kind.as_str()
         )),
     }
 }
 
 fn collect_prompt_document_plan(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
     source_file: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    sections: &mut Vec<CompositeSection>,
-    seen: &mut BTreeMap<PathBuf, usize>,
+    state: &mut PlanState<'_>,
 ) -> Result<()> {
     let metadata = load_document_metadata(source_file)?;
-    if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+    if !resource_targets_adapter(metadata.as_ref(), context.adapter)? {
         return Ok(());
     }
     let logical_name = prompt_logical_name(source_file)?;
-    let managed_name = ensure_managed_name(kind, &logical_name);
+    let managed_name = ensure_managed_name(context.kind, &logical_name);
     let markdown = fs::read_to_string(source_file)?;
-    let resource = parse_prompt_resource(kind, &managed_name, &markdown)?;
+    let resource = parse_prompt_resource(context.kind, &managed_name, &markdown)?;
 
-    match (adapter, kind) {
+    match (context.adapter, context.kind) {
         (AdapterKind::Claude, AssetKind::Commands)
         | (AdapterKind::Claude, AssetKind::OutputStyles) => {
-            let rendered = render_claude_markdown(kind, &resource)?;
+            let rendered = render_claude_markdown(context.kind, &resource)?;
             let rel = source_file.file_name().ok_or_else(|| {
                 anyhow!("invalid prompt resource path `{}`", source_file.display())
             })?;
-            let rel = managed_relative_path(kind, Path::new(rel))?;
+            let rel = managed_relative_path(context.kind, Path::new(rel))?;
             push_rendered_file(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 managed_name,
                 rel,
                 rendered.into_bytes(),
-                origin_layer,
-                origin_detail,
-                plan,
-                seen,
                 ExposureMode::Direct,
             )
         }
@@ -2306,18 +2249,13 @@ fn collect_prompt_document_plan(
             let rel = source_file.file_name().ok_or_else(|| {
                 anyhow!("invalid prompt resource path `{}`", source_file.display())
             })?;
-            let rel = managed_relative_path(kind, Path::new(rel))?;
+            let rel = managed_relative_path(context.kind, Path::new(rel))?;
             push_rendered_file(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 managed_name,
                 rel,
                 rendered.into_bytes(),
-                origin_layer,
-                origin_detail,
-                plan,
-                seen,
                 ExposureMode::Direct,
             )
         }
@@ -2326,45 +2264,39 @@ fn collect_prompt_document_plan(
             if rendered.trim().is_empty() {
                 return Ok(());
             }
-            sections.push(CompositeSection {
-                adapter,
-                kind,
+            state.sections.push(CompositeSection {
+                adapter: context.adapter,
+                kind: context.kind,
                 title: source_file
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or(kind.as_str())
+                    .unwrap_or(context.kind.as_str())
                     .to_string(),
                 content: rendered,
-                origin_layer,
-                origin_detail,
+                origin_layer: context.origin_layer,
+                origin_detail: context.origin_detail.clone(),
             });
             Ok(())
         }
         _ => Err(anyhow!(
             "unexpected prompt document mapping for `{}` `{}`",
-            adapter.as_str(),
-            kind.as_str()
+            context.adapter.as_str(),
+            context.kind.as_str()
         )),
     }
 }
 
 fn collect_prompt_directory_plan(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
     resource_dir: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    _sections: &mut Vec<CompositeSection>,
-    seen: &mut BTreeMap<PathBuf, usize>,
+    state: &mut PlanState<'_>,
 ) -> Result<()> {
     let logical_name = resource_dir
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("invalid prompt resource path `{}`", resource_dir.display()))?
         .to_string();
-    let managed_name = ensure_managed_name(kind, &logical_name);
+    let managed_name = ensure_managed_name(context.kind, &logical_name);
     let parent = resource_dir.parent().ok_or_else(|| {
         anyhow!(
             "resource directory `{}` has no parent",
@@ -2372,16 +2304,16 @@ fn collect_prompt_directory_plan(
         )
     })?;
     let metadata = load_resource_metadata(parent, &logical_name)?;
-    if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+    if !resource_targets_adapter(metadata.as_ref(), context.adapter)? {
         return Ok(());
     }
-    let primary_name = primary_markdown_name(kind)
-        .ok_or_else(|| anyhow!("no primary markdown file for `{}`", kind.as_str()))?;
+    let primary_name = primary_markdown_name(context.kind)
+        .ok_or_else(|| anyhow!("no primary markdown file for `{}`", context.kind.as_str()))?;
     let primary_path = resource_dir.join(primary_name);
     if !primary_path.exists() {
         return Err(anyhow!(
             "{} `{}` is missing {}",
-            kind.as_str(),
+            context.kind.as_str(),
             resource_dir
                 .strip_prefix(parent)
                 .unwrap_or(resource_dir)
@@ -2389,7 +2321,8 @@ fn collect_prompt_directory_plan(
             primary_name
         ));
     }
-    if kind == AssetKind::Skills && resource_dir.join("agents").join("openai.yaml").exists() {
+    if context.kind == AssetKind::Skills && resource_dir.join("agents").join("openai.yaml").exists()
+    {
         return Err(anyhow!(
             "skill `{}` must not author `agents/openai.yaml` directly; use Codex frontmatter metadata instead",
             logical_name
@@ -2397,78 +2330,53 @@ fn collect_prompt_directory_plan(
     }
 
     let markdown = fs::read_to_string(&primary_path)?;
-    let resource = parse_prompt_resource(kind, &managed_name, &markdown)?;
+    let resource = parse_prompt_resource(context.kind, &managed_name, &markdown)?;
 
-    match (adapter, kind) {
+    match (context.adapter, context.kind) {
         (AdapterKind::Claude, AssetKind::Skills) | (AdapterKind::Claude, AssetKind::Agents) => {
-            let rendered = render_claude_markdown(kind, &resource)?;
+            let rendered = render_claude_markdown(context.kind, &resource)?;
             push_rendered_file(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 managed_name.clone(),
                 PathBuf::from(&managed_name).join(primary_name),
                 rendered.into_bytes(),
-                origin_layer,
-                origin_detail.clone(),
-                plan,
-                seen,
                 ExposureMode::Direct,
             )?;
             copy_prompt_directory_companions(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 resource_dir,
                 &managed_name,
                 &primary_path,
-                origin_layer,
-                origin_detail,
-                plan,
-                seen,
             )
         }
         (AdapterKind::Codex, AssetKind::Skills) => {
             let rendered = render_codex_skill_markdown(&resource)?;
             push_rendered_file(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 managed_name.clone(),
                 PathBuf::from(&managed_name).join(primary_name),
                 rendered.into_bytes(),
-                origin_layer,
-                origin_detail.clone(),
-                plan,
-                seen,
                 ExposureMode::Direct,
             )?;
             copy_prompt_directory_companions(
-                project_root,
-                adapter,
-                kind,
+                context,
+                state,
                 resource_dir,
                 &managed_name,
                 &primary_path,
-                origin_layer,
-                origin_detail.clone(),
-                plan,
-                seen,
             )?;
             if let Some(sidecar) = render_codex_skill_sidecar(&resource)? {
                 push_rendered_file(
-                    project_root,
-                    adapter,
-                    kind,
+                    context,
+                    state,
                     managed_name,
                     PathBuf::from(resource.logical_name.as_str())
                         .join("agents")
                         .join("openai.yaml"),
                     sidecar.into_bytes(),
-                    origin_layer,
-                    origin_detail,
-                    plan,
-                    seen,
                     ExposureMode::Direct,
                 )?;
             }
@@ -2484,18 +2392,18 @@ fn collect_prompt_directory_plan(
             let exposed_relative_path = PathBuf::from(".codex")
                 .join("agents")
                 .join(format!("{managed_name}.toml"));
-            if let Some(index) = seen.get(&generated_relative_path).copied() {
-                let existing = &plan[index];
+            if let Some(index) = state.seen.get(&generated_relative_path).copied() {
+                let existing = &state.plan[index];
                 return Err(anyhow!(
                     "duplicate managed asset target {} from {} and {}",
                     existing.exposed_relative_path.display(),
                     existing.origin_detail,
-                    origin_detail
+                    context.origin_detail
                 ));
             } else {
-                let index = plan.len();
-                seen.insert(generated_relative_path.clone(), index);
-                plan.push(PlannedFile {
+                let index = state.plan.len();
+                state.seen.insert(generated_relative_path.clone(), index);
+                state.plan.push(PlannedFile {
                     adapter: AdapterKind::Codex,
                     kind: AssetKind::Agents,
                     exposure_mode: ExposureMode::GeneratedComposite,
@@ -2503,31 +2411,26 @@ fn collect_prompt_directory_plan(
                     generated_relative_path,
                     exposed_relative_path,
                     contents: rendered.into_bytes(),
-                    origin_layer,
-                    origin_detail,
+                    origin_layer: context.origin_layer,
+                    origin_detail: context.origin_detail.clone(),
                 });
             }
             Ok(())
         }
         _ => Err(anyhow!(
             "unexpected prompt directory mapping for `{}` `{}`",
-            adapter.as_str(),
-            kind.as_str()
+            context.adapter.as_str(),
+            context.kind.as_str()
         )),
     }
 }
 
 fn copy_prompt_directory_companions(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
+    state: &mut PlanState<'_>,
     resource_dir: &Path,
     logical_name: &str,
     primary_path: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    seen: &mut BTreeMap<PathBuf, usize>,
 ) -> Result<()> {
     let files = collect_file_paths(resource_dir)?;
     for file in files {
@@ -2535,20 +2438,17 @@ fn copy_prompt_directory_companions(
             continue;
         }
         let rel = file.strip_prefix(resource_dir)?;
-        if kind == AssetKind::Skills && rel == Path::new("agents").join("openai.yaml").as_path() {
+        if context.kind == AssetKind::Skills
+            && rel == Path::new("agents").join("openai.yaml").as_path()
+        {
             continue;
         }
         push_rendered_file(
-            project_root,
-            adapter,
-            kind,
+            context,
+            state,
             logical_name.to_string(),
             PathBuf::from(logical_name).join(rel),
             fs::read(&file)?,
-            origin_layer,
-            origin_detail.clone(),
-            plan,
-            seen,
             ExposureMode::Direct,
         )?;
     }
@@ -2556,57 +2456,53 @@ fn copy_prompt_directory_companions(
 }
 
 fn push_rendered_file(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
+    state: &mut PlanState<'_>,
     relative_name: String,
     relative_path_within_kind: PathBuf,
     contents: Vec<u8>,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    seen: &mut BTreeMap<PathBuf, usize>,
     exposure_mode: ExposureMode,
 ) -> Result<()> {
     let generated_relative_path = PathBuf::from(".ply")
         .join("generated")
-        .join(adapter.as_str())
-        .join(kind.as_str())
+        .join(context.adapter.as_str())
+        .join(context.kind.as_str())
         .join(&relative_path_within_kind);
-    let exposed_root = adapter
-        .direct_asset_root(project_root, kind)
+    let exposed_root = context
+        .adapter
+        .direct_asset_root(context.project_root, context.kind)
         .ok_or_else(|| {
             anyhow!(
                 "no direct root for `{}` `{}`",
-                adapter.as_str(),
-                kind.as_str()
+                context.adapter.as_str(),
+                context.kind.as_str()
             )
         })?;
     let exposed_relative_path = exposed_root
-        .strip_prefix(project_root)?
+        .strip_prefix(context.project_root)?
         .join(&relative_path_within_kind);
 
-    if let Some(index) = seen.get(&generated_relative_path).copied() {
-        let existing = &plan[index];
+    if let Some(index) = state.seen.get(&generated_relative_path).copied() {
+        let existing = &state.plan[index];
         return Err(anyhow!(
             "duplicate managed asset target {} from {} and {}",
             existing.exposed_relative_path.display(),
             existing.origin_detail,
-            origin_detail
+            context.origin_detail
         ));
     } else {
-        let index = plan.len();
-        seen.insert(generated_relative_path.clone(), index);
-        plan.push(PlannedFile {
-            adapter,
-            kind,
+        let index = state.plan.len();
+        state.seen.insert(generated_relative_path.clone(), index);
+        state.plan.push(PlannedFile {
+            adapter: context.adapter,
+            kind: context.kind,
             exposure_mode,
             relative_name,
             generated_relative_path,
             exposed_relative_path,
             contents,
-            origin_layer,
-            origin_detail,
+            origin_layer: context.origin_layer,
+            origin_detail: context.origin_detail.clone(),
         });
     }
     Ok(())
@@ -2624,16 +2520,11 @@ fn render_codex_prompt_markdown(
 }
 
 fn collect_planned_files(
-    project_root: &Path,
-    adapter: AdapterKind,
-    kind: AssetKind,
+    context: &PlanContext<'_>,
     source_dir: &Path,
-    origin_layer: LayerKind,
-    origin_detail: String,
-    plan: &mut Vec<PlannedFile>,
-    seen: &mut BTreeMap<PathBuf, usize>,
+    state: &mut PlanState<'_>,
 ) -> Result<()> {
-    if adapter == AdapterKind::Codex && kind == AssetKind::Agents {
+    if context.adapter == AdapterKind::Codex && context.kind == AssetKind::Agents {
         return Ok(());
     }
     let mut metadata_cache: BTreeMap<String, Result<Option<AssetMetadata>>> = BTreeMap::new();
@@ -2651,49 +2542,52 @@ fn collect_planned_files(
             .or_insert_with(|| load_resource_metadata(source_dir, &top_level_name))
             .as_ref()
             .map_err(|err| anyhow!(err.to_string()))?;
-        if !resource_targets_adapter(metadata.as_ref(), adapter)? {
+        if !resource_targets_adapter(metadata.as_ref(), context.adapter)? {
             continue;
         }
-        let managed_name = ensure_managed_name(kind, &top_level_name);
-        let managed_rel = managed_relative_path(kind, rel)?;
+        let managed_name = ensure_managed_name(context.kind, &top_level_name);
+        let managed_rel = managed_relative_path(context.kind, rel)?;
 
         let generated_relative_path = PathBuf::from(".ply")
             .join("generated")
-            .join(adapter.as_str())
-            .join(kind.as_str())
+            .join(context.adapter.as_str())
+            .join(context.kind.as_str())
             .join(&managed_rel);
-        let exposed_root = adapter
-            .direct_asset_root(project_root, kind)
+        let exposed_root = context
+            .adapter
+            .direct_asset_root(context.project_root, context.kind)
             .ok_or_else(|| {
                 anyhow!(
                     "no direct root for `{}` `{}`",
-                    adapter.as_str(),
-                    kind.as_str()
+                    context.adapter.as_str(),
+                    context.kind.as_str()
                 )
             })?;
-        let exposed_relative_path = exposed_root.strip_prefix(project_root)?.join(&managed_rel);
+        let exposed_relative_path = exposed_root
+            .strip_prefix(context.project_root)?
+            .join(&managed_rel);
 
-        if let Some(index) = seen.get(&generated_relative_path).copied() {
-            let existing = &plan[index];
+        if let Some(index) = state.seen.get(&generated_relative_path).copied() {
+            let existing = &state.plan[index];
             return Err(anyhow!(
                 "duplicate managed asset target {} from {} and {}",
                 existing.exposed_relative_path.display(),
                 existing.origin_detail,
-                origin_detail
+                context.origin_detail
             ));
         } else {
-            let index = plan.len();
-            seen.insert(generated_relative_path.clone(), index);
-            plan.push(PlannedFile {
-                adapter,
-                kind,
+            let index = state.plan.len();
+            state.seen.insert(generated_relative_path.clone(), index);
+            state.plan.push(PlannedFile {
+                adapter: context.adapter,
+                kind: context.kind,
                 exposure_mode: ExposureMode::Direct,
                 relative_name: managed_name,
                 generated_relative_path,
                 exposed_relative_path,
                 contents: fs::read(&file)?,
-                origin_layer,
-                origin_detail: origin_detail.clone(),
+                origin_layer: context.origin_layer,
+                origin_detail: context.origin_detail.clone(),
             });
         }
     }
@@ -2851,22 +2745,22 @@ fn render_managed_block_body(title: &str, sections: &[CompositeSection]) -> Stri
 
 fn upsert_managed_block(existing: &str, managed_body: &str) -> String {
     let managed_block = format!("{PLY_MANAGED_START}\n{managed_body}\n{PLY_MANAGED_END}");
-    if let Some(start) = existing.find(PLY_MANAGED_START) {
-        if let Some(end) = existing[start..].find(PLY_MANAGED_END) {
-            let end_index = start + end + PLY_MANAGED_END.len();
-            let mut rendered = String::new();
-            rendered.push_str(existing[..start].trim_end());
-            if !rendered.trim().is_empty() {
-                rendered.push_str("\n\n");
-            }
-            rendered.push_str(&managed_block);
-            let suffix = existing[end_index..].trim();
-            if !suffix.is_empty() {
-                rendered.push_str("\n\n");
-                rendered.push_str(suffix);
-            }
-            return rendered + "\n";
+    if let Some(start) = existing.find(PLY_MANAGED_START)
+        && let Some(end) = existing[start..].find(PLY_MANAGED_END)
+    {
+        let end_index = start + end + PLY_MANAGED_END.len();
+        let mut rendered = String::new();
+        rendered.push_str(existing[..start].trim_end());
+        if !rendered.trim().is_empty() {
+            rendered.push_str("\n\n");
         }
+        rendered.push_str(&managed_block);
+        let suffix = existing[end_index..].trim();
+        if !suffix.is_empty() {
+            rendered.push_str("\n\n");
+            rendered.push_str(suffix);
+        }
+        return rendered + "\n";
     }
     if existing.trim().is_empty() {
         return managed_block + "\n";

@@ -1,0 +1,111 @@
+name: Homebrew
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag or version to publish, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-homebrew-formula:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAP_REPOSITORY: jeansimeoni/homebrew-tap
+      TAP_DEFAULT_BRANCH: main
+      GIT_AUTHOR_NAME: Jean Simeoni
+      GIT_AUTHOR_EMAIL: opensource@users.noreply.github.com
+      GIT_COMMITTER_NAME: Jean Simeoni
+      GIT_COMMITTER_EMAIL: opensource@users.noreply.github.com
+    steps:
+      - id: resolve
+        name: Resolve tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            tag="$(
+              git ls-remote --tags "$repo_url" \
+                | awk -v sha="${{ github.event.workflow_run.head_sha }}" '
+                    $1 == sha && $2 !~ /\^\{\}$/ {
+                      ref = $2
+                      sub(/^refs\/tags\//, "", ref)
+                      if (ref ~ /^v?[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$/) {
+                        print ref
+                      }
+                    }
+                  ' \
+                | sort -V \
+                | tail -n 1
+            )"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "No semver tag found for release workflow head ${{ github.event.workflow_run.head_sha }}" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            tag="v$tag"
+          fi
+
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download generated Homebrew formula
+        run: |
+          mkdir -p formula-artifacts
+          gh release download "${{ steps.resolve.outputs.tag }}" \
+            --repo jeansimeoni/ply \
+            --dir formula-artifacts \
+            --pattern "ply.rb"
+
+      - name: Clone or initialize tap repository
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          repo_url="https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPOSITORY}.git"
+
+          if git ls-remote --exit-code "$repo_url" HEAD >/dev/null 2>&1; then
+            git clone "$repo_url" tap-repo
+            cd tap-repo
+            git checkout "${TAP_DEFAULT_BRANCH}" || git checkout -b "${TAP_DEFAULT_BRANCH}"
+          else
+            git init tap-repo
+            cd tap-repo
+            git checkout -b "${TAP_DEFAULT_BRANCH}"
+            git remote add origin "$repo_url"
+          fi
+
+          mkdir -p Formula
+
+      - name: Publish formula
+        shell: bash
+        run: |
+          install -Dm644 formula-artifacts/ply.rb tap-repo/Formula/ply.rb
+
+          cd tap-repo
+          git config user.name "${GIT_AUTHOR_NAME}"
+          git config user.email "${GIT_AUTHOR_EMAIL}"
+          git add Formula/ply.rb
+
+          if git diff --cached --quiet; then
+            echo "No Homebrew formula changes to publish"
+            exit 0
+          fi
+
+          git commit -m "ply ${{ steps.resolve.outputs.version }}"
+          git push origin "HEAD:${TAP_DEFAULT_BRANCH}"

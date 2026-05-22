@@ -36,11 +36,7 @@ pub fn prompt_confirmation(title: &str, body: &str) -> Result<bool, io::Error> {
     let unicode = stdout_supports_unicode();
     let mut stdout = io::stdout();
     write_panel(&mut stdout, unicode, Tone::Warning, title, body)?;
-    let prompt = if unicode {
-        "  Continue? [y/N]: "
-    } else {
-        "  Continue? [y/N]: "
-    };
+    let prompt = "  Continue? [y/N]: ";
     write!(stdout, "{prompt}")?;
     stdout.flush()?;
 

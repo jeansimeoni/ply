@@ -1,0 +1,197 @@
+name: AUR
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/aur.yml
+      - scripts/generate-aur-ply-bin.sh
+      - scripts/check-aur-packaging.sh
+      - packaging/aur/**
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/aur.yml
+      - scripts/generate-aur-ply-bin.sh
+      - scripts/check-aur-packaging.sh
+      - packaging/aur/**
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag or version to publish, for example v0.1.0
+        required: true
+        type: string
+      publish:
+        description: Push the generated metadata to AUR
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  static-check:
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check AUR packaging generation
+        run: scripts/check-aur-packaging.sh
+
+  prepare:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - id: resolve
+        name: Resolve release inputs
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            tag="$(
+              git ls-remote --tags "$repo_url" \
+                | awk -v sha="${{ github.event.workflow_run.head_sha }}" '
+                    $1 == sha && $2 !~ /\^\{\}$/ {
+                      ref = $2
+                      sub(/^refs\/tags\//, "", ref)
+                      if (ref ~ /^v?[0-9]+\.[0-9]+\.[0-9]+([-.].*)?$/) {
+                        print ref
+                      }
+                    }
+                  ' \
+                | sort -V \
+                | tail -n 1
+            )"
+            publish=true
+          else
+            tag="${{ inputs.tag }}"
+            publish="${{ inputs.publish }}"
+          fi
+
+          if [[ -z "$tag" ]]; then
+            echo "No semver tag found for release workflow head ${{ github.event.workflow_run.head_sha }}" >&2
+            exit 1
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            tag="v$tag"
+          fi
+
+          version="${tag#v}"
+          if [[ "$version" == *-* ]] && [[ "$publish" == "true" ]]; then
+            echo "Refusing to publish prerelease version $tag to AUR" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+      - name: Download release checksums
+        run: |
+          gh release download "${{ steps.resolve.outputs.tag }}" \
+            --repo jeansimeoni/ply \
+            --pattern sha256.sum \
+            --dir .
+
+      - name: Generate AUR packaging files
+        run: |
+          scripts/generate-aur-ply-bin.sh \
+            --version "${{ steps.resolve.outputs.version }}" \
+            --sha256-file sha256.sum \
+            --output-dir aur-package
+
+      - name: Upload generated package metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur-package
+          path: aur-package/
+          include-hidden-files: true
+
+  validate:
+    needs: prepare
+    if: ${{ needs.prepare.result == 'success' }}
+    runs-on: ubuntu-22.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm git sudo
+
+      - name: Download generated package metadata
+        uses: actions/download-artifact@v8
+        with:
+          name: aur-package
+          path: aur-package
+
+      - name: Validate PKGBUILD and .SRCINFO
+        shell: bash
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+          su builder -c "cd '$GITHUB_WORKSPACE/aur-package' && makepkg --printsrcinfo > .SRCINFO.generated"
+          diff -u "$GITHUB_WORKSPACE/aur-package/.SRCINFO" "$GITHUB_WORKSPACE/aur-package/.SRCINFO.generated"
+
+          su builder -c "cd '$GITHUB_WORKSPACE/aur-package' && makepkg --verifysource --skippgpcheck"
+
+  publish:
+    needs:
+      - prepare
+      - validate
+    if: ${{ needs.prepare.outputs.publish == 'true' && needs.validate.result == 'success' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download generated package metadata
+        uses: actions/download-artifact@v8
+        with:
+          name: aur-package
+          path: aur-package
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "${{ secrets.AUR_KNOWN_HOSTS }}" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Clone AUR repository
+        run: git clone ssh://aur@aur.archlinux.org/ply-bin.git aur-repo
+
+      - name: Publish updated AUR metadata
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: ${{ vars.AUR_PACKAGER_NAME || 'Jean Simeoni' }}
+          GIT_AUTHOR_EMAIL: ${{ vars.AUR_PACKAGER_EMAIL || 'opensource@users.noreply.github.com' }}
+          GIT_COMMITTER_NAME: ${{ vars.AUR_PACKAGER_NAME || 'Jean Simeoni' }}
+          GIT_COMMITTER_EMAIL: ${{ vars.AUR_PACKAGER_EMAIL || 'opensource@users.noreply.github.com' }}
+        run: |
+          install -Dm644 aur-package/PKGBUILD aur-repo/PKGBUILD
+          install -Dm644 aur-package/.SRCINFO aur-repo/.SRCINFO
+
+          cd aur-repo
+          git add PKGBUILD .SRCINFO
+
+          if git diff --cached --quiet; then
+            echo "No AUR changes to publish"
+            exit 0
+          fi
+
+          git commit -m "ply-bin ${{ needs.prepare.outputs.version }}"
+          git push

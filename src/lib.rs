@@ -303,6 +303,7 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
 #[command(
     name = "ply",
     about = "Composable package manager for coding-agent assets",
+    version,
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -530,9 +531,7 @@ impl InitCli {
     fn resolve(self) -> Result<InitRequest> {
         let scaffold_local_packages = if self.with_packages {
             true
-        } else if self.without_packages {
-            false
-        } else if self.yes {
+        } else if self.without_packages || self.yes {
             false
         } else {
             ui::prompt_yes_no(
@@ -719,10 +718,7 @@ fn render_help(topic: Option<HelpTopic>) -> Result<String> {
     String::from_utf8(buffer).map_err(|err| anyhow!("failed to render help output: {err}"))
 }
 
-fn command_for_topic<'a>(
-    command: &'a mut clap::Command,
-    topic: HelpTopic,
-) -> Result<&'a mut clap::Command> {
+fn command_for_topic(command: &mut clap::Command, topic: HelpTopic) -> Result<&mut clap::Command> {
     let path: &[&str] = match topic {
         HelpTopic::Init => &["init"],
         HelpTopic::InitPackage => &["init", "package"],

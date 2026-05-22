@@ -8,8 +8,8 @@ This page summarizes the current MVP CLI surface.
   `ply init`.
 - Project-mode `init`, `apply`, and `clean` require the current directory to be
   a Git repository.
-- The docs assume the `ply` binary is already installed and available on your
-  `PATH`.
+- Install guidance lives in [`../install.md`](../install.md).
+- Version output is available through `ply -V` and `ply --version`.
 
 ## `ply init`
 

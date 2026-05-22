@@ -346,14 +346,14 @@ fn resolve_checkout_revision(
     rev: &str,
     ssh_command: Option<&str>,
 ) -> Result<String> {
-    if rev == "HEAD" {
-        if let Ok(resolved) = run_git_with_env(
+    if rev == "HEAD"
+        && let Ok(resolved) = run_git_with_env(
             repo_path,
             ["rev-parse", "--verify", "refs/remotes/origin/HEAD"],
             ssh_command,
-        ) {
-            return Ok(resolved);
-        }
+        )
+    {
+        return Ok(resolved);
     }
     if rev != "HEAD" {
         let remote_ref = format!("refs/remotes/origin/{rev}");
@@ -438,6 +438,116 @@ fn expand_tilde(value: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(home).join(rest));
     }
     Ok(PathBuf::from(value))
+}
+
+pub fn diff_contents(current: &[u8], desired: &[u8], label: &str) -> Result<String> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_root = std::env::temp_dir().join(format!("ply-diff-{}-{stamp}", std::process::id()));
+    fs::create_dir_all(&temp_root)?;
+    let current_path = temp_root.join("current");
+    let desired_path = temp_root.join("desired");
+    fs::write(&current_path, current)?;
+    fs::write(&desired_path, desired)?;
+
+    let output = Command::new("git")
+        .args(["diff", "--no-index", "--no-prefix", "--"])
+        .arg(&current_path)
+        .arg(&desired_path)
+        .output()
+        .context("failed to run `git diff --no-index`")?;
+
+    let _ = fs::remove_dir_all(&temp_root);
+
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(anyhow!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout)
+        .replace(
+            current_path.to_string_lossy().as_ref(),
+            &format!("a/{label}"),
+        )
+        .replace(
+            desired_path.to_string_lossy().as_ref(),
+            &format!("b/{label}"),
+        );
+    Ok(diff.trim().to_string())
+}
+
+pub fn run_git<I, S>(project_root: &Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_git_with_env(project_root, args, None)
+}
+
+fn run_git_with_env<I, S>(project_root: &Path, args: I, ssh_command: Option<&str>) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let output = command.output().context("failed to run git command")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn run_git_args_with_env<I, S>(
+    project_root: &Path,
+    args: I,
+    trailing_arg: Option<&OsStr>,
+    ssh_command: Option<&str>,
+    label: &str,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    if let Some(trailing_arg) = trailing_arg {
+        command.arg(trailing_arg);
+    }
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run `{label}`"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "git exited with a non-zero status".to_string()
+        };
+        return Err(anyhow!("{label} failed: {detail}"));
+    }
+    Ok(())
+}
+
+fn relative_path<'a>(project_root: &'a Path, path: &'a Path) -> Result<&'a Path> {
+    path.strip_prefix(project_root)
+        .with_context(|| format!("{} is not under {}", path.display(), project_root.display()))
 }
 
 #[cfg(test)]
@@ -596,114 +706,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-pub fn run_git<I, S>(project_root: &Path, args: I) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    run_git_with_env(project_root, args, None)
-}
-
-fn run_git_with_env<I, S>(project_root: &Path, args: I, ssh_command: Option<&str>) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut command = Command::new("git");
-    command.args(args).current_dir(project_root);
-    if let Some(ssh_command) = ssh_command {
-        command.env("GIT_SSH_COMMAND", ssh_command);
-    }
-    let output = command.output().context("failed to run git command")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn run_git_args_with_env<I, S>(
-    project_root: &Path,
-    args: I,
-    trailing_arg: Option<&OsStr>,
-    ssh_command: Option<&str>,
-    label: &str,
-) -> Result<()>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let mut command = Command::new("git");
-    command.args(args).current_dir(project_root);
-    if let Some(trailing_arg) = trailing_arg {
-        command.arg(trailing_arg);
-    }
-    if let Some(ssh_command) = ssh_command {
-        command.env("GIT_SSH_COMMAND", ssh_command);
-    }
-    let output = command
-        .output()
-        .with_context(|| format!("failed to run `{label}`"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            "git exited with a non-zero status".to_string()
-        };
-        return Err(anyhow!("{label} failed: {detail}"));
-    }
-    Ok(())
-}
-
-fn relative_path<'a>(project_root: &'a Path, path: &'a Path) -> Result<&'a Path> {
-    path.strip_prefix(project_root)
-        .with_context(|| format!("{} is not under {}", path.display(), project_root.display()))
-}
-
-pub fn diff_contents(current: &[u8], desired: &[u8], label: &str) -> Result<String> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!("ply-diff-{}-{stamp}", std::process::id()));
-    fs::create_dir_all(&temp_root)?;
-    let current_path = temp_root.join("current");
-    let desired_path = temp_root.join("desired");
-    fs::write(&current_path, current)?;
-    fs::write(&desired_path, desired)?;
-
-    let output = Command::new("git")
-        .args(["diff", "--no-index", "--no-prefix", "--"])
-        .arg(&current_path)
-        .arg(&desired_path)
-        .output()
-        .context("failed to run `git diff --no-index`")?;
-
-    let _ = fs::remove_dir_all(&temp_root);
-
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(anyhow!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    let diff = String::from_utf8_lossy(&output.stdout)
-        .replace(
-            current_path.to_string_lossy().as_ref(),
-            &format!("a/{label}"),
-        )
-        .replace(
-            desired_path.to_string_lossy().as_ref(),
-            &format!("b/{label}"),
-        );
-    Ok(diff.trim().to_string())
 }

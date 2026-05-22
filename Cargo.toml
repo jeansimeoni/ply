@@ -2,6 +2,13 @@
 name = "ply"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.94"
+description = "Local-first package manager for coding-agent assets."
+license = "GPL-3.0-only"
+repository = "https://github.com/jeansimeoni/ply"
+homepage = "https://plycli.dev"
+keywords = ["ai", "agents", "codex", "claude", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
@@ -14,3 +21,7 @@ toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
