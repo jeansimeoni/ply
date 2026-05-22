@@ -3586,13 +3586,7 @@ mod tests {
         )?;
         assert!(report.target_root.join("ply.toml").exists());
         assert!(report.target_root.join("ply.local.toml").exists());
-        assert!(
-            report
-                .target_root
-                .join(".ply")
-                .join("state.json")
-                .exists()
-        );
+        assert!(report.target_root.join(".ply").join("state.json").exists());
         Ok(())
     }
 
@@ -3644,10 +3638,7 @@ mod tests {
             package_root.display()
         );
         write(&temp.path().join("ply.toml"), &manifest)?;
-        write(
-            &temp.path().join("ply.local.toml"),
-            "schema_version = 1\n",
-        )?;
+        write(&temp.path().join("ply.local.toml"), "schema_version = 1\n")?;
         write(
             &temp.path().join(".ply").join("state.json"),
             "{\n  \"schema_version\": 1,\n  \"ignore_config\": false,\n  \"owned_paths\": []\n}\n",
@@ -4658,10 +4649,7 @@ Use short, direct responses.
 
         let manifest_after = fs::read_to_string(temp.path().join("ply.toml"))?;
         assert_eq!(manifest_before, manifest_after);
-        assert_eq!(
-            ssh_exists_before,
-            temp.path().join("ply.ssh.toml").exists()
-        );
+        assert_eq!(ssh_exists_before, temp.path().join("ply.ssh.toml").exists());
         assert_eq!(lock_exists_before, temp.path().join("ply.lock").exists());
         Ok(())
     }

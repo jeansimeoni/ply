@@ -11,6 +11,8 @@ trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 "$repo_root/scripts/generate-aur-ply-bin.sh" \
     --version 0.1.0 \
     --sha256-file "$fixture" \
+    --maintainer-name "Jean Simeoni" \
+    --maintainer-email "opensource@users.noreply.github.com" \
     --output-dir "$tmp_dir"
 
 pkgbuild="$tmp_dir/PKGBUILD"
@@ -27,6 +29,7 @@ srcinfo="$tmp_dir/.SRCINFO"
 
 grep -Fq "pkgname=ply-bin" "$pkgbuild"
 grep -Fq "pkgver=0.1.0" "$pkgbuild"
+grep -Fq "# Maintainer: Jean Simeoni <opensource@users.noreply.github.com>" "$pkgbuild"
 grep -Fq "url='https://plycli.dev'" "$pkgbuild"
 grep -Fq "source_x86_64=(\"ply-\${pkgver}-x86_64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.0/ply-x86_64-unknown-linux-musl.tar.xz\")" "$pkgbuild"
 grep -Fq "source_aarch64=(\"ply-\${pkgver}-aarch64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.0/ply-aarch64-unknown-linux-musl.tar.xz\")" "$pkgbuild"
@@ -45,5 +48,9 @@ grep -Fq "sha256sums_aarch64 = 1111111111111111111111111111111111111111111111111
 
 diff -u "$committed_dir/PKGBUILD" "$pkgbuild"
 diff -u "$committed_dir/.SRCINFO" "$srcinfo"
+[ -f "$committed_dir/LICENSE" ] || {
+    printf 'error: missing packaging/aur/ply-bin/LICENSE\n' >&2
+    exit 1
+}
 
 printf 'AUR packaging check passed\n'

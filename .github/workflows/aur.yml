@@ -2,14 +2,14 @@ name: AUR
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
     paths:
       - .github/workflows/aur.yml
       - scripts/generate-aur-ply-bin.sh
       - scripts/check-aur-packaging.sh
       - packaging/aur/**
   pull_request:
-    branches: [main]
+    branches: [master, main]
     paths:
       - .github/workflows/aur.yml
       - scripts/generate-aur-ply-bin.sh
@@ -110,11 +110,16 @@ jobs:
             --dir .
 
       - name: Generate AUR packaging files
+        env:
+          AUR_PACKAGER_NAME: ${{ vars.AUR_PACKAGER_NAME || 'Jean Simeoni' }}
+          AUR_PACKAGER_EMAIL: ${{ vars.AUR_PACKAGER_EMAIL || 'opensource@users.noreply.github.com' }}
         run: |
           scripts/generate-aur-ply-bin.sh \
             --version "${{ steps.resolve.outputs.version }}" \
             --sha256-file sha256.sum \
             --output-dir aur-package
+
+          install -Dm644 packaging/aur/ply-bin/LICENSE aur-package/LICENSE
 
       - name: Upload generated package metadata
         uses: actions/upload-artifact@v7
@@ -184,9 +189,10 @@ jobs:
         run: |
           install -Dm644 aur-package/PKGBUILD aur-repo/PKGBUILD
           install -Dm644 aur-package/.SRCINFO aur-repo/.SRCINFO
+          install -Dm644 aur-package/LICENSE aur-repo/LICENSE
 
           cd aur-repo
-          git add PKGBUILD .SRCINFO
+          git add PKGBUILD .SRCINFO LICENSE
 
           if git diff --cached --quiet; then
             echo "No AUR changes to publish"

@@ -123,9 +123,12 @@ move release tags.
 ## First AUR Bootstrap
 
 1. Generate `PKGBUILD` and `.SRCINFO` from the release `sha256.sum` file with
-   `scripts/generate-aur-ply-bin.sh`.
-2. Clone `ssh://aur@aur.archlinux.org/ply-bin.git`.
-3. Copy in the generated `PKGBUILD` and `.SRCINFO`, commit, and push once.
+   `scripts/generate-aur-ply-bin.sh`, including the maintainer identity.
+2. Clone `ssh://aur@aur.archlinux.org/ply-bin.git` with `master` as the local
+   default branch.
+3. Copy in the generated `PKGBUILD`, `.SRCINFO`, and
+   `packaging/aur/ply-bin/LICENSE`.
+4. Commit and push the initial `master` branch once.
 
 ## Licensing
 

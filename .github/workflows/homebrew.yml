@@ -61,10 +61,17 @@ jobs:
           fi
 
           version="${tag#v}"
+          publish=true
+          if [[ "$version" == *-* ]]; then
+            publish=false
+          fi
+
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
       - name: Download generated Homebrew formula
+        if: ${{ steps.resolve.outputs.publish == 'true' }}
         run: |
           mkdir -p formula-artifacts
           gh release download "${{ steps.resolve.outputs.tag }}" \
@@ -73,6 +80,7 @@ jobs:
             --pattern "ply.rb"
 
       - name: Clone or initialize tap repository
+        if: ${{ steps.resolve.outputs.publish == 'true' }}
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
@@ -93,6 +101,7 @@ jobs:
           mkdir -p Formula
 
       - name: Publish formula
+        if: ${{ steps.resolve.outputs.publish == 'true' }}
         shell: bash
         run: |
           install -Dm644 formula-artifacts/ply.rb tap-repo/Formula/ply.rb
@@ -109,3 +118,7 @@ jobs:
 
           git commit -m "ply ${{ steps.resolve.outputs.version }}"
           git push origin "HEAD:${TAP_DEFAULT_BRANCH}"
+
+      - name: Skip prerelease Homebrew publish
+        if: ${{ steps.resolve.outputs.publish != 'true' }}
+        run: echo "Skipping Homebrew publish for prerelease tag ${{ steps.resolve.outputs.tag }}"

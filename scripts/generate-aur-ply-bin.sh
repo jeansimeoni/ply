@@ -2,13 +2,15 @@
 set -eu
 
 usage() {
-    printf 'usage: %s --version <version> --sha256-file <path> --output-dir <path>\n' "$0" >&2
+    printf 'usage: %s --version <version> --sha256-file <path> --output-dir <path> [--maintainer-name <name>] [--maintainer-email <email>]\n' "$0" >&2
     exit 1
 }
 
 version=''
 sha256_file=''
 output_dir=''
+maintainer_name="${AUR_PACKAGER_NAME:-Jean Simeoni}"
+maintainer_email="${AUR_PACKAGER_EMAIL:-opensource@users.noreply.github.com}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -27,6 +29,16 @@ while [ "$#" -gt 0 ]; do
             output_dir="$2"
             shift 2
             ;;
+        --maintainer-name)
+            [ "$#" -ge 2 ] || usage
+            maintainer_name="$2"
+            shift 2
+            ;;
+        --maintainer-email)
+            [ "$#" -ge 2 ] || usage
+            maintainer_email="$2"
+            shift 2
+            ;;
         *)
             usage
             ;;
@@ -36,6 +48,8 @@ done
 [ -n "$version" ] || usage
 [ -n "$sha256_file" ] || usage
 [ -n "$output_dir" ] || usage
+[ -n "$maintainer_name" ] || usage
+[ -n "$maintainer_email" ] || usage
 [ -f "$sha256_file" ] || {
     printf 'error: sha256 file not found: %s\n' "$sha256_file" >&2
     exit 1
@@ -86,6 +100,7 @@ pkgbuild_path="$output_dir/PKGBUILD"
 srcinfo_path="$output_dir/.SRCINFO"
 
 cat >"$pkgbuild_path" <<EOF
+# Maintainer: $maintainer_name <$maintainer_email>
 pkgname=ply-bin
 pkgver=$pkgver
 pkgrel=1

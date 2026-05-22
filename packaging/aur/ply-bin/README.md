@@ -11,6 +11,7 @@ from source.
 
 - `PKGBUILD`: committed baseline package metadata for `v0.1.0`
 - `.SRCINFO`: committed generated metadata for `v0.1.0`
+- `LICENSE`: 0BSD license for the AUR repository source files
 - `testdata/sha256.sum`: deterministic fixture for local and CI generation checks
 - `scripts/generate-aur-ply-bin.sh`: renders `PKGBUILD` and `.SRCINFO`
 - `scripts/check-aur-packaging.sh`: verifies the generator output in normal CI
@@ -19,20 +20,51 @@ from source.
 
 ## Manual bootstrap
 
-1. Create an AUR SSH key dedicated to GitHub Actions.
-2. Add the public key to your AUR account.
-3. Add `AUR_SSH_PRIVATE_KEY` and `AUR_KNOWN_HOSTS` to the `ply` GitHub
-   repository secrets.
-4. Generate the package metadata for the first stable release:
+1. Verify `ply-bin` is still available in the AUR and that your local AUR SSH
+   key can authenticate to `aur.archlinux.org`.
+2. Generate the package metadata for the first stable release:
 
 ```bash
 tmp_dir="$(mktemp -d)"
 curl -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0/sha256.sum -o "$tmp_dir/sha256.sum"
-scripts/generate-aur-ply-bin.sh --version 0.1.0 --sha256-file "$tmp_dir/sha256.sum" --output-dir "$tmp_dir"
+scripts/generate-aur-ply-bin.sh \
+  --version 0.1.0 \
+  --sha256-file "$tmp_dir/sha256.sum" \
+  --maintainer-name "Jean Simeoni" \
+  --maintainer-email "opensource@users.noreply.github.com" \
+  --output-dir "$tmp_dir"
 ```
 
-5. Clone `ssh://aur@aur.archlinux.org/ply-bin.git`, copy in `PKGBUILD` and
-   `.SRCINFO`, commit, and push.
+3. Clone the AUR package repo:
+
+```bash
+git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/ply-bin.git
+```
+
+For a new package, Git should warn that the repository is empty. If it is not
+empty, review the existing history before pushing.
+
+4. Add the initial repository contents and make sure the local branch is
+   `master`:
+
+```bash
+cd ply-bin
+git branch -M master
+install -Dm644 "$tmp_dir/PKGBUILD" PKGBUILD
+install -Dm644 "$tmp_dir/.SRCINFO" .SRCINFO
+install -Dm644 /home/jeansimeoni/Projects/ply/packaging/aur/ply-bin/LICENSE LICENSE
+```
+
+5. Optionally set a repo-local Git identity for AUR commits, then create the
+   first commit and push:
+
+```bash
+git config user.name "Jean Simeoni"
+git config user.email "opensource@users.noreply.github.com"
+git add PKGBUILD .SRCINFO LICENSE
+git commit -m "Add initial ply-bin package"
+git push origin master
+```
 
 After that first push, the `AUR` GitHub workflow can update the package
 automatically for later stable releases.
