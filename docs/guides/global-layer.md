@@ -124,7 +124,9 @@ ply doctor -g
 
 These commands inspect the global root itself. A project that has
 `use_global = true` still needs its own `ply apply` run inside the repo to
-compose global and project layers together.
+compose global and project layers together. As in project mode, `ply apply`
+reuses locked Git revisions from `ply.lock`, while `ply update -g` is the
+command that advances locked global Git revisions.
 
 ## Opt out in a project
 

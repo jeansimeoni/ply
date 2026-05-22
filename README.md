@@ -69,7 +69,10 @@ Implemented behavior:
   - `repo` as local path, GitHub shorthand, or full remote
   - local semantic overrides through `ply.local.toml`
   - local SSH transport config through `ply.ssh.toml`
-  - pinned revisions in `ply.lock`
+  - source-origin cache identity under `.ply/cache/sources/`
+  - locked source locators and resolved revisions in `ply.lock`
+  - lock-aware `ply apply` that reuses locked Git revisions when present
+  - `ply update` as the command that advances locked Git revisions
 - deterministic generation under `.ply/generated/`
 - Claude and Codex asset mapping for:
   - `commands`
@@ -169,6 +172,15 @@ ply add -g --id personal --path /home/you/agent-packages/review-tools
 Ply still uses the current source-only model: each `[[sources]]` entry points
 at exactly one package root.
 
+`ply.lock` records source locators plus resolved revisions for the current
+composition. For a path source that means the configured `path` and the
+resolved canonical package root. For a Git source that means the configured
+`repo` and the resolved locked revision.
+
+When a Git source already has a matching entry in `ply.lock`, `ply apply`
+reuses that locked revision and does not opportunistically advance it. Run
+`ply update` when you want to advance locked Git revisions.
+
 ## Local config layers
 
 Shared project intent lives in `ply.toml`.
@@ -211,6 +223,29 @@ With that combination, a shared shorthand source such as
 modifying `ply.toml`.
 
 ## Package layout
+
+`ply-package.toml` supports:
+
+- `name` (required)
+- `version` (optional, must be valid semver if present)
+- `description` (optional)
+- `license` (optional)
+- `targets` (optional)
+
+Example:
+
+```toml
+name = "example-review"
+version = "1.2.0"
+description = "Reusable review helpers"
+license = "MIT"
+targets = ["codex", "claude"]
+```
+
+Package validation rejects package roots that contain adapter-owned directories
+such as `.claude/`, `.agents/`, or `.codex/`. A package root must also contain
+at least one supported managed asset kind; `ply-package.toml` alone is not a
+valid consumable package.
 
 Each package contains a `ply-package.toml` file plus shared top-level asset
 kinds:
@@ -273,6 +308,10 @@ Write accurate documentation with verifiable examples.
 Package resources target all adapters enabled in the consuming project's
 `ply.toml` by default.
 
+If `ply-package.toml` declares package-level `targets`, that list is an upper
+bound for the package. Resource-level `targets` may only narrow further and
+cannot expand beyond the package-level adapter set.
+
 To limit a resource to selected adapters, add metadata with a `targets` list:
 
 - directory resources such as `skills/review-diff/` use
@@ -295,7 +334,9 @@ Example file metadata:
 targets = ["codex"]
 ```
 
-If `targets` is omitted or empty, the resource applies to all enabled adapters.
+If package-level `targets` is omitted or empty, the package applies to all
+enabled adapters. If a resource-level `targets` list is omitted or empty, that
+resource inherits the package-level adapter set.
 
 ## Adapter mapping
 

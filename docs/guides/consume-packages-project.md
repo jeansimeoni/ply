@@ -172,16 +172,23 @@ all overwrite prompts automatically.
 
 Successful `apply` also updates:
 
-- `ply.lock` with resolved source revisions
+- `ply.lock` with source locators plus resolved revisions
 - `.ply/state.json` with the set of files Ply currently owns
 - `.ply/generated/` with deterministic generated outputs
 
-To refresh Git source revisions without applying managed assets:
+For Git sources, `ply apply` is lock-aware. If `ply.lock` already contains
+a matching entry for a Git source, `apply` reuses that locked revision and does
+not opportunistically advance it.
+
+To advance locked Git source revisions without applying managed assets:
 
 ```bash
 ply update
 ply update team
 ```
+
+After `ply update`, run `ply apply` to expose assets from the new locked
+revisions.
 
 For the user-global root, the same commands support `--global` / `-g`.
 
@@ -221,6 +228,10 @@ Common uses:
 - point a shared Git source at a local checkout
 - change `rev` locally
 - add overlays that only apply in one clone
+
+If you change a Git source locator locally, run `ply update` before a
+targeted `ply update <source-id>` workflow so `ply.lock` records the new
+locator.
 
 Example:
 

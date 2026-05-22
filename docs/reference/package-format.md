@@ -16,14 +16,25 @@ Minimal example:
 name = "review-tools"
 ```
 
-Supported manifest fields today:
+Supported manifest fields:
 
-- `name`
-- `version`
-- `description`
+- `name` (required)
+- `version` (optional, must be valid semver if present)
+- `description` (optional)
+- `license` (optional)
+- `targets` (optional)
 
 Each configured source points at one package root. A source is invalid if
 `ply-package.toml` is missing from the source root.
+
+If package-level `targets` is present, it defines the maximum adapter set for
+the package. Resource-level `targets` may only narrow further inside that set.
+
+Package validation also rejects:
+
+- unsupported adapter-owned directories such as `.claude/`, `.agents/`,
+  `.codex/`, `.cursor/`, and `.gemini/`
+- package roots that contain no supported managed assets
 
 ## Supported top-level asset kinds
 
@@ -74,6 +85,11 @@ review-tools/
     └── review-diff/
         └── SKILL.md
 ```
+
+A package root that contains only `ply-package.toml` is not a valid
+consumable package. Add at least one supported asset kind such as `skills/`,
+`commands/`, `agents/`, `rules/`, `hooks/`, `output-styles/`, or
+`local-instructions.md`.
 
 ## Prompt-resource kinds
 
@@ -157,7 +173,12 @@ Unknown frontmatter keys are rejected.
 
 ## Per-resource adapter targeting
 
-Resources target all enabled adapters unless you add metadata that limits them.
+Resources target all adapters allowed by the package unless you add metadata
+that limits them.
+
+If `ply-package.toml` defines package-level `targets`, that list is an upper
+bound. Resource-level `targets` can narrow to a subset such as `["codex"]`,
+but they cannot introduce an adapter the package itself does not allow.
 
 Use:
 
@@ -170,7 +191,9 @@ Example:
 targets = ["codex"]
 ```
 
-If `targets` is omitted or empty, the resource applies to all enabled adapters.
+If package-level `targets` is omitted or empty, the package applies to all
+enabled adapters. If resource-level `targets` is omitted or empty, that
+resource inherits the package adapter set.
 
 ## Naming and exposed prefixes
 

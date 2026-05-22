@@ -49,6 +49,36 @@ Fix:
 - if the source should point somewhere else, update `path` or `repo`
 - re-run `ply sources` to confirm the resolved location
 
+Remember that one source maps to one package root. Ply does not select a
+sub-package from within a larger source tree.
+
+## `package <name> contains unsupported adapter directory ...`
+
+Cause:
+
+- the package root contains adapter-owned directories such as `.claude/`,
+  `.agents/`, or `.codex/`
+
+Fix:
+
+- move authored package content into portable package asset kinds such as
+  `skills/`, `commands/`, `agents/`, `rules/`, `hooks/`, `output-styles/`, or
+  `local-instructions.md`
+- remove adapter-owned output directories from the package root
+
+## `package <name> does not expose any supported managed assets`
+
+Cause:
+
+- the package root contains `ply-package.toml` but no supported managed
+  assets
+
+Fix:
+
+- add at least one supported managed asset kind
+- if you just ran `ply init package` without `--kinds`, add package content
+  before consuming that package from a source
+
 ## Unsupported source or adapter
 
 Common causes:
@@ -154,6 +184,32 @@ Fix:
 - verify the `repo` value
 - use `HEAD` or omit `rev` for local repo paths
 - verify `ply.ssh.toml` if you expect GitHub shorthand to resolve over SSH
+
+## `ply apply` did not advance a Git source
+
+Cause:
+
+- `ply.lock` already contains a matching lock entry for that Git source
+- `ply apply` is lock-aware and reuses the locked revision
+
+Fix:
+
+- run `ply update`
+- or run `ply update <source-id>` to advance one locked Git source
+- then run `ply apply` to expose assets from the new locked revision
+
+## `ply update <source-id>` refuses to preserve other Git sources
+
+Cause:
+
+- `ply.lock` is missing a previous revision for another configured Git source
+- or the current source locator no longer matches the locator recorded in
+  `ply.lock`
+
+Fix:
+
+- run `ply update` without a source id to rewrite the full lockfile with the
+  current source locators and resolved revisions
 
 ## Related docs
 

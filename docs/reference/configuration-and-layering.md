@@ -73,8 +73,17 @@ Supported fields:
 
 Written by `ply apply` and `ply update`.
 
-This lockfile records the resolved source identifier, source kind, and resolved
-revision that was applied.
+This lockfile records the source identifier, source kind, source locator, and
+resolved revision for the current composition.
+
+Practical shape:
+
+- path sources record `path` plus the resolved canonical package root
+- Git sources record `repo` plus the resolved locked revision
+
+For Git sources, `ply apply` reuses a matching locked revision from
+`ply.lock` and does not opportunistically advance it. `ply update` is the
+command that advances locked Git revisions.
 
 ### `.ply/state.json`
 
@@ -105,6 +114,10 @@ Supported source kinds:
 - local paths
 - GitHub shorthand such as `owner/repo`
 - full remote URLs
+
+Git source cache identity is tied to the resolved source origin, not the source
+`id`. Renaming a source `id` without changing its origin reuses the same cache
+checkout under `.ply/cache/sources/`.
 
 ## Global and project layering
 

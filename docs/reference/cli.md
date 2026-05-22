@@ -38,6 +38,9 @@ Notes:
 
 - `--adapters` accepts a comma-separated subset of `codex,claude`
 - if omitted, Ply initializes the manifest with both adapters enabled
+- `ply init package` can create only `ply-package.toml`, but that package
+  root will not pass package validation until you add at least one supported
+  managed asset
 
 ## `ply init package`
 
@@ -59,6 +62,8 @@ Notes:
 - `--name` is required.
 - `--kinds` is a comma-separated list such as `skills,commands,agents`.
 - If `--kinds` is omitted, only `ply-package.toml` is created.
+- `ply-package.toml` supports `name`, optional `version`, optional
+  `description`, optional `license`, and optional `targets`.
 
 ## `ply apply`
 
@@ -77,7 +82,11 @@ Notes:
 
 - `--dry-run` previews layering, planned assets, and drift prompts.
 - `--yes` accepts all overwrite prompts for drifted managed exposed files.
-- A successful apply updates `ply.lock` and `.ply/state.json`.
+- For Git sources, `apply` reuses the locked revision from `ply.lock` when a
+  matching lock entry is present.
+- `apply` does not opportunistically advance locked Git revisions.
+- A successful apply rewrites `ply.lock` with source locators plus resolved
+  revisions and updates `.ply/state.json`.
 
 ## `ply add`
 
@@ -95,7 +104,7 @@ Notes:
 - `--ssh` marks the Git source to use SSH transport with the default SSH key
 - `--ssh-key <path>` marks the Git source to use SSH transport with a specific key path
 - `--ssh` and `--ssh-key` update `ply.ssh.toml`
-- adding a Git source also refreshes `ply.lock`
+- adding a Git source also refreshes that source's `ply.lock` entry
 - `--global`, `-g` mutates `~/.config/ply/ply.toml`
 
 ## `ply remove`
@@ -114,7 +123,7 @@ Notes:
 
 ## `ply update`
 
-Refresh Git sources and rewrite `ply.lock`.
+Advance locked Git revisions and rewrite `ply.lock`.
 
 ```txt
 ply update [--global] [source-id]
@@ -124,6 +133,7 @@ Notes:
 
 - without a `source-id`, all configured Git sources are refreshed
 - with a `source-id`, that source must resolve to a Git source
+- `ply update` is the command that advances locked Git revisions
 - `ply update` does not run `ply apply`
 - `--global`, `-g` refreshes sources for `~/.config/ply`
 
@@ -151,6 +161,13 @@ Options:
 
 - `--global`, `-g`
 
+Notes:
+
+- package validation rejects unsupported adapter-owned directories such as
+  `.claude/`, `.agents/`, and `.codex/` inside a package root
+- package validation rejects package roots that expose no supported managed
+  assets
+
 ## `ply list`
 
 Show resolved package roots.
@@ -165,7 +182,7 @@ Options:
 
 ## `ply sources`
 
-Show configured sources and their resolved revisions.
+Show configured sources and their resolved locators and revisions.
 
 ```txt
 ply sources [options]

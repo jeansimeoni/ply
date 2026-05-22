@@ -77,8 +77,19 @@ Create `ply-package.toml`:
 
 ```toml
 name = "review-tools"
+version = "1.0.0"
 description = "Reusable review helpers"
+license = "MIT"
+targets = ["codex", "claude"]
 ```
+
+Manifest rules:
+
+- `name` is required
+- `version` is optional, but must be valid semver if present
+- `description`, `license`, and `targets` are optional
+- package-level `targets` is an upper bound for the package
+- resource-level `targets` may only narrow further inside that package
 
 Add a skill:
 
@@ -138,10 +149,14 @@ ply diff
 
 This verifies both package structure and rendered adapter output.
 
+Validation also rejects package roots that contain adapter-owned directories
+such as `.claude/`, `.agents/`, or `.codex/`. Author package content in the
+portable package asset kinds instead.
+
 ## Add adapter targeting when needed
 
-Resources target all enabled adapters by default. Add a sidecar metadata file
-only when a resource should apply to selected adapters.
+Resources target all adapters allowed by the package by default. Add a sidecar
+metadata file only when a resource should apply to a narrower adapter subset.
 
 Directory resource example:
 

@@ -37,6 +37,10 @@ ply apply
 Ply writes generated files, updates exposed managed files, refreshes
 `ply.lock`, and updates `.ply/state.json`.
 
+For Git sources, `apply` reuses the locked revision already recorded in
+`ply.lock` when the source locator still matches. It does not
+opportunistically advance locked Git sources.
+
 If a file is already managed by Ply but its exposed contents differ from the
 new desired result, Ply treats that as drift and asks before overwriting that
 file.
@@ -49,8 +53,11 @@ ply update team
 ply update -g
 ```
 
-when you want to refresh Git source revisions in `ply.lock` without writing
+when you want to advance locked Git revisions in `ply.lock` without writing
 managed assets.
+
+After `ply update`, run `ply apply` to expose assets from the new locked
+revisions.
 
 Use:
 
@@ -127,7 +134,8 @@ These commands are useful when:
 
 - a source override in `ply.local.toml` is not taking effect
 - a project and global layer both define sources
-- you want to confirm the exact source revision used by the last composition
+- you want to confirm the exact source locator and revision used by the last
+  composition
 
 ## Clean managed files safely
 
