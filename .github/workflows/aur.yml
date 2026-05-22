@@ -94,8 +94,8 @@ jobs:
 
           version="${tag#v}"
           if [[ "$version" == *-* ]] && [[ "$publish" == "true" ]]; then
-            echo "Refusing to publish prerelease version $tag to AUR" >&2
-            exit 1
+            echo "Skipping AUR publish for prerelease version $tag"
+            publish=false
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
