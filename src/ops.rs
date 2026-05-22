@@ -317,7 +317,6 @@ pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitRep
             &target_root,
             &State {
                 schema_version: 1,
-                install_mode: "copy".to_string(),
                 ignore_config: request.options.ignore_config,
                 owned_paths: Vec::new(),
             },
@@ -1222,7 +1221,6 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
     config::write_lockfile(project_root, &lockfile)?;
     let state = State {
         schema_version: 1,
-        install_mode: "copy".to_string(),
         ignore_config: previous_state.ignore_config,
         owned_paths: planned_files
             .iter()
@@ -3748,7 +3746,7 @@ mod tests {
             "# check\n",
         )?;
         let manifest = format!(
-            "schema_version = 1\nadapters = [\"codex\", \"claude\"]\n\n[install]\nmode = \"copy\"\nuse_global = false\n\n[[sources]]\nid = \"fixture\"\nkind = \"path\"\npath = \"{}\"\n",
+            "schema_version = 1\nadapters = [\"codex\", \"claude\"]\n\n[install]\nuse_global = false\n\n[[sources]]\nid = \"fixture\"\nkind = \"path\"\npath = \"{}\"\n",
             package_root.display()
         );
         write(&temp.path().join("ply.toml"), &manifest)?;
@@ -3758,7 +3756,7 @@ mod tests {
         )?;
         write(
             &temp.path().join(".ply").join("state.json"),
-            "{\n  \"schema_version\": 1,\n  \"install_mode\": \"copy\",\n  \"ignore_config\": false,\n  \"owned_paths\": []\n}\n",
+            "{\n  \"schema_version\": 1,\n  \"ignore_config\": false,\n  \"owned_paths\": []\n}\n",
         )?;
 
         apply(

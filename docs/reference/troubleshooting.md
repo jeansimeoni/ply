@@ -97,11 +97,11 @@ Common causes:
 
 - a source `kind` other than `path` or `git`
 - an adapter other than `codex` or `claude`
-- an install mode other than `copy`
+- an unsupported field in `ply.toml`, such as legacy `install.mode`
 
 Fix:
 
-- update the manifest to use currently supported values only
+- update the manifest to use only the currently documented schema
 
 ## `ply init package` refuses a non-empty directory
 

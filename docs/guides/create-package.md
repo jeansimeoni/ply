@@ -130,7 +130,6 @@ schema_version = 1
 adapters = ["codex", "claude"]
 
 [install]
-mode = "copy"
 use_global = false
 
 [[sources]]

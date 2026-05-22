@@ -136,7 +136,7 @@ schema_version = 1
 adapters = ["codex", "claude"]
 
 [install]
-mode = "copy"
+use_global = true
 
 [[sources]]
 id = "team"

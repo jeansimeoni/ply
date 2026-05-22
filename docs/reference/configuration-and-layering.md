@@ -16,7 +16,6 @@ schema_version = 1
 adapters = ["codex", "claude"]
 
 [install]
-mode = "copy"
 use_global = true
 
 [[sources]]
@@ -30,7 +29,6 @@ Important fields:
 
 - `schema_version`: only `1` is supported
 - `adapters`: defaults to `["codex", "claude"]`, or whatever subset was chosen during `ply init --adapters`
-- `[install].mode`: only `"copy"` is implemented
 - `[install].use_global`: defaults to `true`
 - `[[sources]]`: the package roots to consume
 - each source points at exactly one package root
@@ -91,7 +89,6 @@ Written by `ply init` and updated by `ply apply`.
 
 This local state file records:
 
-- the install mode
 - whether init chose local ignore behavior for config files
 - the set of managed paths Ply currently owns
 

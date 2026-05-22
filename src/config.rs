@@ -20,9 +20,8 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallConfig {
-    #[serde(default = "default_install_mode")]
-    pub mode: String,
     #[serde(default = "default_use_global")]
     pub use_global: bool,
 }
@@ -113,11 +112,10 @@ pub struct LockedSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    #[serde(default)]
-    pub install_mode: String,
     #[serde(default)]
     pub ignore_config: bool,
     #[serde(default)]
@@ -163,10 +161,6 @@ fn default_schema_version() -> u32 {
     1
 }
 
-fn default_install_mode() -> String {
-    "copy".to_string()
-}
-
 fn default_use_global() -> bool {
     true
 }
@@ -178,7 +172,6 @@ fn default_adapters() -> Vec<String> {
 impl Default for InstallConfig {
     fn default() -> Self {
         Self {
-            mode: default_install_mode(),
             use_global: default_use_global(),
         }
     }
@@ -278,7 +271,6 @@ pub fn load_state(project_root: &Path) -> Result<State> {
     if !path.exists() {
         return Ok(State {
             schema_version: 1,
-            install_mode: default_install_mode(),
             ignore_config: false,
             owned_paths: Vec::new(),
         });
@@ -468,12 +460,6 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         return Err(anyhow!(
             "unsupported schema_version `{}`; only version 1 is supported",
             manifest.schema_version
-        ));
-    }
-    if manifest.install.mode != "copy" {
-        return Err(anyhow!(
-            "unsupported install mode `{}`; only `copy` is implemented",
-            manifest.install.mode
         ));
     }
     let mut source_ids = BTreeSet::new();
@@ -772,6 +758,38 @@ path = ".ply/overlays/codex/skills"
         assert!(written.contains("adapters = [\"claude\"]"));
         assert!(!written.contains("\"codex\""));
         Ok(())
+    }
+
+    #[test]
+    fn reject_manifest_with_legacy_install_mode_field() {
+        let err = toml::from_str::<Manifest>(
+            r#"
+schema_version = 1
+adapters = ["codex", "claude"]
+
+[install]
+mode = "copy"
+use_global = true
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `mode`"));
+    }
+
+    #[test]
+    fn reject_state_with_legacy_install_mode_field() {
+        let err = serde_json::from_str::<State>(
+            r#"{
+  "schema_version": 1,
+  "install_mode": "copy",
+  "ignore_config": false,
+  "owned_paths": []
+}"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `install_mode`"));
     }
 
     #[test]

@@ -59,7 +59,6 @@ schema_version = 1
 adapters = ["codex", "claude"]
 
 [install]
-mode = "copy"
 use_global = true
 
 [[sources]]
@@ -71,7 +70,6 @@ path = "./ply-packages/example-review"
 Important points:
 
 - `schema_version = 1` is the only supported schema version.
-- `mode = "copy"` is the only implemented install mode.
 - `use_global = true` means project composition includes the user-global Ply
   layer if one exists.
 - Each `[[sources]]` entry points at one package root that must contain
@@ -253,7 +251,6 @@ path = ".ply/overlays/codex/skills"
 
 - It does not edit repository-owned `AGENTS.md` or `CLAUDE.md`.
 - It does not modify `.gitignore` by default.
-- It does not support install modes other than `copy`.
 - It does not treat one source as multiple packages. Each source points at one
   package root.
 
