@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/ply-logo.png" alt="Ply" width="720">
+  <img src="docs/assets/ply-logo.png" alt="Ply" width="560">
 </p>
 
 # Ply
