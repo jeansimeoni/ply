@@ -118,6 +118,9 @@ move release tags.
 ## Packaging Prerequisites
 
 - Create the public GitHub repository `jeansimeoni/homebrew-tap`.
+- If GitHub Actions cannot create releases with `GITHUB_TOKEN`, add
+  `RELEASE_TOKEN` to the `ply` repository secrets with `repo` access so the
+  release workflow can create and update GitHub Releases.
 - Add `HOMEBREW_TAP_TOKEN` to the `ply` repository secrets with write access
   to that tap repository.
 - Create a dedicated AUR SSH key for GitHub Actions and add the public key to
