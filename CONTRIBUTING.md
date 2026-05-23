@@ -50,7 +50,7 @@ scripts/check-aur-packaging.sh
 ## Release Process
 
 Releases are maintainer-controlled and are published by the generated `dist`
-workflow from protected version tags such as `v0.1.0` or `v0.1.0-rc2`.
+workflow from protected version tags such as `v0.1.0` or `v0.1.0-rc3`.
 
 Stable package-manager publishing is layered on top of that release flow:
 
@@ -102,8 +102,8 @@ git push origin v0.1.0
 To cut a prerelease, use the matching prerelease version and tag:
 
 ```bash
-git tag v0.1.0-rc2
-git push origin v0.1.0-rc2
+git tag v0.1.0-rc3
+git push origin v0.1.0-rc3
 ```
 
 After the `Release` workflow completes, verify that the GitHub Release contains
