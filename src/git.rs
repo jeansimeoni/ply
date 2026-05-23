@@ -651,7 +651,7 @@ mod tests {
         run_git(temp.path(), ["init", "--bare", remote.to_str().unwrap()])?;
         let worktree = temp.path().join("worktree");
         fs::create_dir_all(&worktree)?;
-        run_git(&worktree, ["init", "-b", "master"])?;
+        run_git(&worktree, ["init", "-b", "main"])?;
         run_git(&worktree, ["config", "user.email", "test@example.com"])?;
         run_git(&worktree, ["config", "user.name", "Test User"])?;
         run_git(
@@ -659,7 +659,7 @@ mod tests {
             ["remote", "add", "origin", remote.to_str().unwrap()],
         )?;
         let first = commit_file(&worktree, "ply-package.toml", "name = \"fixture\"\n")?;
-        run_git(&worktree, ["push", "origin", "master"])?;
+        run_git(&worktree, ["push", "origin", "main"])?;
 
         let source = SourceConfig {
             id: "fixture".to_string(),
@@ -667,14 +667,14 @@ mod tests {
             path: None,
             repo: Some(format!("file://{}", remote.display())),
             url: None,
-            rev: Some("master".to_string()),
+            rev: Some("main".to_string()),
         };
 
         let (_, resolved_first) = clone_or_update_source(temp.path(), &source, None)?;
         assert_eq!(resolved_first, first);
 
         let second = commit_file(&worktree, "README.md", "# updated\n")?;
-        run_git(&worktree, ["push", "origin", "master"])?;
+        run_git(&worktree, ["push", "origin", "main"])?;
         let (_, resolved_second) = clone_or_update_source(temp.path(), &source, None)?;
         assert_eq!(resolved_second, second);
         Ok(())

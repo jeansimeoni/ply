@@ -2,14 +2,14 @@ name: AUR
 
 on:
   push:
-    branches: [master, main]
+    branches: [main]
     paths:
       - .github/workflows/aur.yml
       - scripts/generate-aur-ply-bin.sh
       - scripts/check-aur-packaging.sh
       - packaging/aur/**
   pull_request:
-    branches: [master, main]
+    branches: [main]
     paths:
       - .github/workflows/aur.yml
       - scripts/generate-aur-ply-bin.sh
