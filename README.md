@@ -48,8 +48,6 @@ layer on top.
 
 ## Notes
 
-Ply is at `v0.1.0-rc3` right now.
-
 The current release baseline focuses on local-first package consumption,
 package authoring, deterministic generation, and safe composition for Codex and
 Claude Code. The broader multi-runtime direction is part of the project vision,
@@ -84,21 +82,25 @@ Supported coding-agent runtimes today:
 
 ## Installation
 
-Current prerelease install methods are available through:
+Install methods currently available include:
 
 - GitHub Releases
 - cargo-dist shell installer
 - downloadable `.deb` and `.rpm` packages
 - source builds
 
-Stable package-manager publishing to Homebrew and the AUR resumes at `v0.1.0`.
+Homebrew and AUR publishing are available for stable releases. Prerelease tags
+continue to ship through GitHub Releases and source builds.
 
-Install with the shell installer:
+Install the latest stable release with the shell installer:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0-rc3/ply-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/latest/download/ply-installer.sh | sh
 ply -V
 ```
+
+If you want a prerelease build or prefer a manual download, pick the release
+artifact you want from GitHub Releases.
 
 If you want to build from source, this repository uses
 [`mise`](https://mise.jdx.dev/) to manage tool versions, so the simplest path

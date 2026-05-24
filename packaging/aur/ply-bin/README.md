@@ -9,8 +9,8 @@ from source.
 
 ## Files
 
-- `PKGBUILD`: committed baseline package metadata for `v0.1.0`
-- `.SRCINFO`: committed generated metadata for `v0.1.0`
+- `PKGBUILD`: committed baseline package metadata for the current stable release
+- `.SRCINFO`: committed generated metadata for the current stable release
 - `LICENSE`: 0BSD license for the AUR repository source files
 - `testdata/sha256.sum`: deterministic fixture for local and CI generation checks
 - `scripts/generate-aur-ply-bin.sh`: renders `PKGBUILD` and `.SRCINFO`
@@ -26,9 +26,11 @@ from source.
 
 ```bash
 tmp_dir="$(mktemp -d)"
-curl -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0/sha256.sum -o "$tmp_dir/sha256.sum"
+release_tag="vX.Y.Z"
+release_version="${release_tag#v}"
+curl -LsSf "https://github.com/jeansimeoni/ply/releases/download/${release_tag}/sha256.sum" -o "$tmp_dir/sha256.sum"
 scripts/generate-aur-ply-bin.sh \
-  --version 0.1.0 \
+  --version "$release_version" \
   --sha256-file "$tmp_dir/sha256.sum" \
   --maintainer-name "Jean Simeoni" \
   --maintainer-email "opensource@users.noreply.github.com" \

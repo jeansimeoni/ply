@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.1.0-rc3
+## v0.1.0
 
-Release candidate for the first public release of Ply.
+First public release of Ply.
 
 Highlights:
 

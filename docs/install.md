@@ -1,6 +1,6 @@
 # Install
 
-Ply `0.1.0-rc3` is available through GitHub Releases, the shell installer,
+Ply is available through GitHub Releases, the shell installer,
 downloadable native Linux packages, and source builds.
 
 Project website: <https://plycli.dev>
@@ -18,11 +18,15 @@ For source builds, you also need:
 
 ## GitHub Releases
 
-All stable releases are published at:
+Release artifacts are published at:
 
 <https://github.com/jeansimeoni/ply/releases>
 
-The `v0.1.0-rc3` release includes:
+Stable releases publish the installer, platform archives, checksums, and source
+artifacts. Prerelease tags may also publish downloadable native Linux
+packages.
+
+Release assets can include:
 
 - macOS archives for `x86_64` and `aarch64`
 - Linux musl archives for `x86_64` and `aarch64`
@@ -35,11 +39,11 @@ extract it, and place `ply` somewhere on your `PATH`.
 
 ## Shell Installer
 
-The shell installer downloads the matching release artifact and installs
+The shell installer downloads the matching stable release artifact and installs
 `ply` into `${CARGO_HOME:-$HOME/.cargo}/bin`.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/download/v0.1.0-rc3/ply-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/latest/download/ply-installer.sh | sh
 ```
 
 Confirm the installed binary:
@@ -76,13 +80,13 @@ These are direct download artifacts, not apt or dnf repositories.
 Install a downloaded `.deb`:
 
 ```bash
-sudo dpkg -i ply_0.1.0~rc3-1_amd64.deb
+sudo dpkg -i ./ply_<version>_<arch>.deb
 ```
 
 Install a downloaded `.rpm`:
 
 ```bash
-sudo dnf install ./ply-0.1.0-0.rc3.1.x86_64.rpm
+sudo dnf install ./ply-<version>-<arch>.rpm
 ```
 
 ## AUR And yay
@@ -140,8 +144,12 @@ Release archives include checksums. Verify downloaded archives against
 
 ## Update
 
-If you installed with the shell installer, rerun the installer for the newer
-release version.
+If you installed with the shell installer, rerun it to install the newest
+stable release:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/latest/download/ply-installer.sh | sh
+```
 
 For a source checkout:
 

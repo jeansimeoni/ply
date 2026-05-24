@@ -244,6 +244,90 @@ authored Markdown:
   settings preamble based on Codex metadata.
 
 Package authors must not author `agents/openai.yaml` directly inside a skill.
+The adapter-specific rendering details below explain the exact output shape for
+Codex, Claude, and additive managed files.
+
+## How Ply renders each adapter
+
+Ply treats the package Markdown as the source of truth, then renders the
+closest shape each adapter expects.
+
+### Codex
+
+Use Codex frontmatter when the target expects structured config rather than a
+plain Markdown prompt.
+
+- `agents/<name>/AGENT.md` becomes `.codex/agents/ply-<name>.toml`.
+- The Markdown body becomes `developer_instructions` in that TOML file.
+- Supported Codex metadata such as `model`, `reasoning_effort`,
+  `sandbox_mode`, `approval_policy`, and `mcp_servers` become TOML fields.
+- `skills/<name>/SKILL.md` becomes `.agents/skills/ply-<name>/SKILL.md`, and
+  `codex.interface`, `codex.policy`, or `codex.dependencies` also generate
+  `.agents/skills/ply-<name>/agents/openai.yaml`.
+- `commands/*.md` stay Markdown in `.agents/commands/`, but Codex metadata is
+  rendered as a `## Ply Codex Settings` preamble ahead of the prompt body.
+
+Example:
+
+```md
+---
+name: reviewer
+codex:
+  model: gpt-5.5
+  reasoning_effort: high
+  sandbox_mode: workspace-write
+  approval_policy: on-request
+---
+
+Review carefully and surface findings first.
+```
+
+renders to a `.codex/agents/ply-reviewer.toml` file with fields such as:
+
+```toml
+name = "reviewer"
+developer_instructions = "Review carefully and surface findings first."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+```
+
+### Claude
+
+Claude keeps the prompt resource as Markdown and rewrites the frontmatter into
+Claude's expected keys.
+
+- `commands/*.md` become `.claude/commands/ply-*.md`.
+- `skills/<name>/SKILL.md` become `.claude/skills/ply-<name>/SKILL.md`.
+- `agents/<name>/AGENT.md` become `.claude/agents/ply-<name>/AGENT.md`.
+- `output-styles/*.md` become `.claude/output-styles/ply-*.md`.
+
+In those files, Ply preserves the prompt body and renders Claude metadata into
+Markdown frontmatter such as `allowed-tools`, `model`, `agent`, `context`, or
+`keep-coding-instructions` when the resource kind supports them.
+
+### Additive prompt files
+
+Some resources do not have a dedicated native target file for every adapter.
+When that happens, Ply surfaces the prompt content through additive managed
+files instead of asking you to author adapter-owned files directly.
+
+- Claude `local-instructions.md` is injected into a managed block inside
+  `CLAUDE.local.md`.
+- Codex `local-instructions.md` and Codex `output-styles/*.md` are composed
+  into `AGENTS.override.md`.
+- `AGENTS.override.md` starts with a generated notice, includes the current
+  repo-owned `AGENTS.md` if it exists, then appends Ply-managed sections for
+  local instructions and output styles.
+
+If a resource does not map cleanly to a standalone Codex config file, Ply
+surfaces it as prompt content in that additive override file.
+
+This is the same path Ply uses when a package includes content that an adapter
+does not support as a first-class standalone asset. Rather than drop it or ask
+you to hand-author adapter-owned files, Ply promotes that content into the
+managed additive prompt file for the target adapter.
 
 ## Related docs
 

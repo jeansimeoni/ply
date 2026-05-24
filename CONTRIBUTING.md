@@ -50,7 +50,7 @@ scripts/check-aur-packaging.sh
 ## Release Process
 
 Releases are maintainer-controlled and are published by the generated `dist`
-workflow from protected version tags such as `v0.1.0` or `v0.1.0-rc3`.
+workflow from protected version tags such as `vX.Y.Z` or `vX.Y.Z-rcN`.
 
 Stable package-manager publishing is layered on top of that release flow:
 
@@ -95,15 +95,15 @@ Linux Packages` workflow after a GitHub Release is published.
 To cut a stable release, tag the reviewed release commit and push the tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 To cut a prerelease, use the matching prerelease version and tag:
 
 ```bash
-git tag v0.1.0-rc3
-git push origin v0.1.0-rc3
+git tag vX.Y.Z-rcN
+git push origin vX.Y.Z-rcN
 ```
 
 After the `Release` workflow completes, verify that the GitHub Release contains
@@ -118,9 +118,6 @@ move release tags.
 ## Packaging Prerequisites
 
 - Create the public GitHub repository `jeansimeoni/homebrew-tap`.
-- If GitHub Actions cannot create releases with `GITHUB_TOKEN`, add
-  `RELEASE_TOKEN` to the `ply` repository secrets with `repo` access so the
-  release workflow can create and update GitHub Releases.
 - Add `HOMEBREW_TAP_TOKEN` to the `ply` repository secrets with write access
   to that tap repository.
 - Create a dedicated AUR SSH key for GitHub Actions and add the public key to
