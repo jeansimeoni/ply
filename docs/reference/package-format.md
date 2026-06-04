@@ -117,6 +117,8 @@ Restrictions:
 
 - `argument-hint` is only valid for `commands`.
 - `keep-coding-instructions` is only valid for `output-styles`.
+- Quote `argument-hint` values when they contain bracketed placeholders or
+  CLI-like syntax such as `[topic]`, `<path>`, or `--flag=value`.
 
 Example:
 
@@ -127,6 +129,21 @@ description: Write clear technical documentation
 ---
 
 Write accurate documentation with verifiable examples.
+```
+
+Command example with multiple arguments:
+
+```md
+---
+name: review-pr
+description: Review a pull request
+argument-hint: "<ticket-number> [--coverage=80] [--post-comments]"
+---
+
+Interpret `$ARGUMENTS` as:
+- required: `<ticket-number>`
+- optional: `--coverage=<n>`
+- optional: `--post-comments`
 ```
 
 ## Claude frontmatter keys
@@ -265,7 +282,8 @@ plain Markdown prompt.
   `codex.interface`, `codex.policy`, or `codex.dependencies` also generate
   `.agents/skills/ply-<name>/agents/openai.yaml`.
 - `commands/*.md` stay Markdown in `.agents/commands/`, but Codex metadata is
-  rendered as a `## Ply Codex Settings` preamble ahead of the prompt body.
+  rendered as a `## Ply Command Metadata` and `## Ply Codex Settings` preamble
+  ahead of the prompt body when applicable.
 
 Example:
 
@@ -291,6 +309,53 @@ model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
+```
+
+For Codex commands, Ply keeps the body as Markdown and injects command metadata
+as prompt text rather than a separate structured command schema.
+
+Example:
+
+```md
+---
+name: review-pr
+description: Review a pull request
+argument-hint: "<ticket-number> [--coverage=80] [--post-comments]"
+codex:
+  model: gpt-5.5
+  tools:
+    - shell
+    - patch
+---
+
+Interpret `$ARGUMENTS` as:
+- required: `<ticket-number>`
+- optional: `--coverage=<n>`
+- optional: `--post-comments`
+```
+
+renders to:
+
+```md
+## Ply Command Metadata
+
+Name: review-pr
+Description: Review a pull request
+Arguments: <ticket-number> [--coverage=80] [--post-comments]
+
+---
+
+## Ply Codex Settings
+
+Preferred model: gpt-5.5
+Preferred tools: shell, patch
+
+---
+
+Interpret `$ARGUMENTS` as:
+- required: `<ticket-number>`
+- optional: `--coverage=<n>`
+- optional: `--post-comments`
 ```
 
 ### Claude

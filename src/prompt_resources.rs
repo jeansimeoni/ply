@@ -373,6 +373,28 @@ pub fn render_codex_prompt_preamble(resource: &ParsedPromptResource) -> Option<S
     Some(rendered)
 }
 
+pub fn render_codex_command_metadata(resource: &ParsedPromptResource) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(name) = &resource.shared.name {
+        lines.push(format!("Name: {name}"));
+    }
+    if let Some(description) = &resource.shared.description {
+        lines.push(format!("Description: {description}"));
+    }
+    if let Some(argument_hint) = &resource.shared.argument_hint {
+        lines.push(format!("Arguments: {argument_hint}"));
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::from("## Ply Command Metadata\n\n");
+    rendered.push_str(&lines.join("\n"));
+    rendered.push_str("\n\n---\n\n");
+    Some(rendered)
+}
+
 fn validate_metadata(
     kind: AssetKind,
     shared: &SharedPromptMetadata,

@@ -118,6 +118,52 @@ codex:
 Review the diff for correctness issues, regressions, and missing tests.
 ```
 
+Add a command with explicit argument guidance:
+
+```txt
+commands/
+└── pr-review.md
+```
+
+Example `commands/pr-review.md`:
+
+```md
+---
+name: pr-review
+description: Review a pull request using the ticket context
+argument-hint: "<ticket-number> [--coverage=80] [--post-comments]"
+
+claude:
+  tools:
+    - Read
+    - Bash
+
+codex:
+  model: gpt-5.5
+  tools:
+    - shell
+    - patch
+---
+
+Interpret `$ARGUMENTS` as:
+- required: `<ticket-number>`
+- optional: `--coverage=<n>`
+- optional: `--post-comments`
+
+If `$ARGUMENTS` is empty, inspect the current branch name for the ticket
+number before asking the user.
+```
+
+Command authoring rules:
+
+- Keep `argument-hint` as a single quoted string. Ply does not use a typed
+  multi-argument schema for commands.
+- Quote values that contain brackets, angle brackets, or `--flag=value`
+  syntax so the YAML frontmatter stays valid.
+- Repeat the argument contract in the body. Claude uses `argument-hint`
+  directly, while Codex receives a generated command metadata block plus the
+  prompt body.
+
 ## Test the package locally
 
 The fastest feedback loop is to consume the package from a local path source in
@@ -147,6 +193,19 @@ ply diff
 ```
 
 This verifies both package structure and rendered adapter output.
+
+Verify a generated command after `ply apply`:
+
+```bash
+sed -n '1,40p' .claude/commands/ply-pr-review.md
+sed -n '1,40p' .agents/commands/ply-pr-review.md
+```
+
+Expected result:
+
+- the Claude file keeps command frontmatter such as `argument-hint`
+- the Codex file includes a `## Ply Command Metadata` block and, when present,
+  a `## Ply Codex Settings` block ahead of the prompt body
 
 You can also validate the package root directly while authoring:
 

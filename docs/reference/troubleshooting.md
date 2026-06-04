@@ -129,6 +129,8 @@ Common causes:
 - malformed YAML frontmatter
 - unsupported keys in shared, `claude`, or `codex` sections
 - using kind-specific metadata on the wrong resource kind
+- unquoted `argument-hint` values that look like YAML lists, such as
+  `[topic] [--flag=value]`
 
 Examples:
 
@@ -140,8 +142,13 @@ Examples:
 Fix:
 
 - correct the YAML format
+- quote `argument-hint` values that use bracketed placeholders or CLI-like
+  syntax
 - remove unsupported keys
 - move metadata to a supported resource kind
+
+Recent Ply versions include the prompt resource path in these parse errors and
+may suggest quoting `argument-hint` when that pattern is detected.
 
 ## `agents/openai.yaml` authored directly inside a skill
 

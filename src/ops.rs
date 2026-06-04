@@ -16,8 +16,8 @@ use crate::config::{
 use crate::git;
 use crate::prompt_resources::{
     is_prompt_resource, parse_prompt_resource, primary_markdown_name, prompt_logical_name,
-    render_claude_markdown, render_codex_agent, render_codex_prompt_preamble,
-    render_codex_skill_markdown, render_codex_skill_sidecar,
+    render_claude_markdown, render_codex_agent, render_codex_command_metadata,
+    render_codex_prompt_preamble, render_codex_skill_markdown, render_codex_skill_sidecar,
 };
 use crate::ui::{self, Tone};
 
@@ -2225,7 +2225,7 @@ fn collect_prompt_document_plan(
     let logical_name = prompt_logical_name(source_file)?;
     let managed_name = ensure_managed_name(context.kind, &logical_name);
     let markdown = fs::read_to_string(source_file)?;
-    let resource = parse_prompt_resource(context.kind, &managed_name, &markdown)?;
+    let resource = parse_prompt_resource_file(context.kind, &managed_name, source_file, &markdown)?;
 
     match (context.adapter, context.kind) {
         (AdapterKind::Claude, AssetKind::Commands)
@@ -2330,7 +2330,8 @@ fn collect_prompt_directory_plan(
     }
 
     let markdown = fs::read_to_string(&primary_path)?;
-    let resource = parse_prompt_resource(context.kind, &managed_name, &markdown)?;
+    let resource =
+        parse_prompt_resource_file(context.kind, &managed_name, &primary_path, &markdown)?;
 
     match (context.adapter, context.kind) {
         (AdapterKind::Claude, AssetKind::Skills) | (AdapterKind::Claude, AssetKind::Agents) => {
@@ -2425,6 +2426,45 @@ fn collect_prompt_directory_plan(
     }
 }
 
+fn parse_prompt_resource_file(
+    kind: AssetKind,
+    managed_name: &str,
+    source_path: &Path,
+    markdown: &str,
+) -> Result<crate::prompt_resources::ParsedPromptResource> {
+    parse_prompt_resource(kind, managed_name, markdown).map_err(|err| {
+        let err = if has_unquoted_argument_hint(markdown) {
+            err.context(
+                "hint: quote `argument-hint` values when using bracketed placeholders such as \"[topic] [--flag=value]\"",
+            )
+        } else {
+            err
+        };
+        err.context(format!("failed to parse {}", source_path.display()))
+    })
+}
+
+fn has_unquoted_argument_hint(markdown: &str) -> bool {
+    if !markdown.starts_with("---\n") {
+        return false;
+    }
+    let rest = &markdown[4..];
+    let Some(end) = rest.find("\n---\n") else {
+        return false;
+    };
+    let frontmatter = &rest[..end];
+    frontmatter.lines().any(|line| {
+        let trimmed = line.trim_start();
+        ["argument-hint:", "argument_hint:"].iter().any(|prefix| {
+            if let Some(value) = trimmed.strip_prefix(prefix) {
+                value.trim_start().starts_with('[')
+            } else {
+                false
+            }
+        })
+    })
+}
+
 fn copy_prompt_directory_companions(
     context: &PlanContext<'_>,
     state: &mut PlanState<'_>,
@@ -2511,11 +2551,23 @@ fn push_rendered_file(
 fn render_codex_prompt_markdown(
     resource: &crate::prompt_resources::ParsedPromptResource,
 ) -> String {
-    match render_codex_prompt_preamble(resource) {
-        Some(preamble) if !resource.body.is_empty() => format!("{preamble}{}\n", resource.body),
-        Some(preamble) => preamble,
-        None if resource.body.is_empty() => String::new(),
-        None => format!("{}\n", resource.body),
+    let mut sections = Vec::new();
+    if resource.shared.argument_hint.is_some() {
+        if let Some(metadata) = render_codex_command_metadata(resource) {
+            sections.push(metadata);
+        }
+    }
+    if let Some(preamble) = render_codex_prompt_preamble(resource) {
+        sections.push(preamble);
+    }
+    if !resource.body.is_empty() {
+        sections.push(format!("{}\n", resource.body));
+    }
+
+    if sections.is_empty() {
+        String::new()
+    } else {
+        sections.concat()
     }
 }
 
@@ -4071,6 +4123,45 @@ mod tests {
     }
 
     #[test]
+    fn prompt_parse_errors_include_source_path_and_argument_hint_guidance() -> Result<()> {
+        let temp = make_project()?;
+        init_test_project(temp.path(), true)?;
+        let package_root = example_package_root(temp.path());
+        write(
+            &package_root.join("commands").join("broken.md"),
+            r#"---
+name: broken
+description: Broken command
+argument-hint: [topic] [--flag=value]
+---
+
+Use $ARGUMENTS.
+"#,
+        )?;
+
+        let err = apply(
+            temp.path(),
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+        assert!(
+            err.to_string().contains(
+                &package_root
+                    .join("commands")
+                    .join("broken.md")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert!(crate::ui::error_body(&err).contains("quote `argument-hint` values"));
+        Ok(())
+    }
+
+    #[test]
     fn apply_dry_run_reports_drift() -> Result<()> {
         let temp = make_project()?;
         init_test_project(temp.path(), true)?;
@@ -4192,7 +4283,7 @@ mod tests {
             r#"---
 name: docs-helper
 description: Help with project documentation
-argument-hint: [topic]
+argument-hint: "[topic]"
 claude:
   tools:
     - Read
@@ -4296,6 +4387,10 @@ Use short, direct responses.
                 .join("commands")
                 .join("ply-docs.md"),
         )?;
+        assert!(codex_command.contains("## Ply Command Metadata"));
+        assert!(codex_command.contains("Name: docs-helper"));
+        assert!(codex_command.contains("Description: Help with project documentation"));
+        assert!(codex_command.contains("Arguments: [topic]"));
         assert!(codex_command.contains("## Ply Codex Settings"));
         assert!(codex_command.contains("Preferred model: gpt-5.5"));
         assert!(codex_command.contains("Write concise documentation"));
