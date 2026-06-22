@@ -165,6 +165,20 @@ ply list
 ply sources
 ```
 
+### Git worktrees
+
+Ply supports linked Git worktrees without requiring configuration to be copied
+into every checkout.
+
+- If the active worktree contains `ply.toml`, Ply uses that configuration.
+- Otherwise, Ply resolves configuration from the main worktree.
+- Generated assets and ownership state remain isolated in the active worktree.
+- Project command reports show both the configuration root and active worktree.
+
+Configuration-changing commands update the resolved configuration root. Running
+`ply clean` from a linked worktree removes only that worktree's generated state
+and managed outputs; it does not remove shared configuration.
+
 ## Donate
 
 If you like this project, you can buy me a beer! It would be really

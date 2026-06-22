@@ -50,6 +50,23 @@ Useful options:
   trackable.
 - `--dry-run` previews what would be created.
 
+## Use linked Git worktrees
+
+When a linked worktree does not contain `ply.toml`, Ply uses the main
+worktree's project configuration automatically. The active worktree remains the
+output target:
+
+- manifests, overlays, path sources, Git source caches, and `ply.lock` resolve
+  from the configuration root
+- generated state and managed adapter assets are written in the active
+  worktree
+- `ply add`, `ply remove`, and `ply update` modify the resolved configuration
+  root
+- `ply clean` removes only the linked worktree's generated state and outputs
+
+An active worktree's own `ply.toml` takes precedence. Project command reports
+identify both roots.
+
 ## Understand the starting manifest
 
 A default `ply.toml` looks like this:

@@ -195,12 +195,16 @@ pub struct CleanOptions {
 pub struct CleanupPreview {
     pub items: Vec<String>,
     pub updates_git_excludes: bool,
+    pub config_root: PathBuf,
+    pub worktree_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 pub struct CleanupReport {
     pub removed_items: Vec<String>,
     pub updated_git_excludes: bool,
+    pub config_root: PathBuf,
+    pub worktree_root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +213,8 @@ pub struct InitReport {
     pub created_local_fixture: bool,
     pub ignore_config: bool,
     pub adapters: Vec<String>,
-    pub target_root: PathBuf,
+    pub config_root: PathBuf,
+    pub worktree_root: PathBuf,
     pub dry_run: bool,
 }
 
@@ -295,48 +300,65 @@ pub struct SourceMutationReport {
 }
 
 pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitReport> {
-    let target_root = target_root(project_root, request.target)?;
+    let (config_root, worktree_root) = match request.target {
+        CommandTarget::Project => {
+            let context = git::repository_context(project_root)?;
+            (context.config_root, context.worktree_root)
+        }
+        CommandTarget::Global => {
+            let root = config::global_root()?;
+            (root.clone(), root)
+        }
+    };
 
-    if matches!(request.target, CommandTarget::Project) {
-        git::ensure_git_repo(&target_root)?;
-    }
-
-    let created_manifest = !target_root.join("ply.toml").exists();
-    let created_local_fixture = !target_root
+    let created_manifest = !config_root.join("ply.toml").exists();
+    let created_local_fixture = !config_root
         .join("ply-packages")
         .join("example-review")
         .exists()
         && request.options.scaffold_local_packages;
 
     if !request.dry_run {
-        fs::create_dir_all(target_root.join(".ply").join("generated"))?;
+        fs::create_dir_all(worktree_root.join(".ply").join("generated"))?;
         fs::create_dir_all(
-            target_root
+            config_root
                 .join(".ply")
                 .join("overlays")
                 .join("codex")
                 .join("skills"),
         )?;
         fs::create_dir_all(
-            target_root
+            config_root
                 .join(".ply")
                 .join("overlays")
                 .join("claude")
                 .join("skills"),
         )?;
-        git::ensure_local_excludes(&target_root, request.options)?;
-        config::write_default_manifest(&target_root, request.options)?;
-        config::write_default_local_manifest(&target_root)?;
+        if matches!(request.target, CommandTarget::Project) {
+            git::ensure_local_excludes(&worktree_root, request.options)?;
+        }
+        config::write_default_manifest(&config_root, request.options)?;
+        config::write_default_local_manifest(&config_root)?;
         config::write_state(
-            &target_root,
+            &worktree_root,
             &State {
                 schema_version: 1,
                 ignore_config: request.options.ignore_config,
                 owned_paths: Vec::new(),
             },
         )?;
+        if config_root != worktree_root && !config_root.join(".ply").join("state.json").exists() {
+            config::write_state(
+                &config_root,
+                &State {
+                    schema_version: 1,
+                    ignore_config: request.options.ignore_config,
+                    owned_paths: Vec::new(),
+                },
+            )?;
+        }
         if request.options.scaffold_local_packages {
-            config::write_default_package_fixture(&target_root)?;
+            config::write_default_package_fixture(&config_root)?;
         }
     }
 
@@ -350,7 +372,8 @@ pub fn init_project(project_root: &Path, request: InitRequest) -> Result<InitRep
             .iter()
             .map(|adapter| adapter.to_string())
             .collect(),
-        target_root,
+        config_root,
+        worktree_root,
         dry_run: request.dry_run,
     })
 }
@@ -1114,16 +1137,34 @@ fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> R
 }
 
 pub fn preview_cleanup(project_root: &Path, options: CleanOptions) -> Result<CleanupPreview> {
-    let root = target_root(project_root, options.target)?;
-    if matches!(options.target, CommandTarget::Project) {
-        git::ensure_git_repo(&root)?;
-    }
+    let project_context = matches!(options.target, CommandTarget::Project)
+        .then(|| git::repository_context(project_root))
+        .transpose()?;
+    let (root, config_root, worktree_root, linked_shared_config) = match &project_context {
+        Some(context) => (
+            context.worktree_root.clone(),
+            context.config_root.clone(),
+            context.worktree_root.clone(),
+            context.uses_main_worktree_config(),
+        ),
+        None => {
+            let root = config::global_root()?;
+            (root.clone(), root.clone(), root, false)
+        }
+    };
 
     let mut items = Vec::new();
-    for path in managed_cleanup_paths(&root)? {
+    let cleanup_paths = if linked_shared_config {
+        managed_output_cleanup_paths(&root)?
+    } else {
+        managed_cleanup_paths(&root)?
+    };
+    for path in cleanup_paths {
         items.push(path.strip_prefix(&root)?.display().to_string());
     }
-    let updates_git_excludes = git::has_ply_excludes(&root);
+    let updates_git_excludes = matches!(options.target, CommandTarget::Project)
+        && !linked_shared_config
+        && git::has_ply_excludes(&root);
 
     if items.is_empty() && !updates_git_excludes {
         let hint = if matches!(options.target, CommandTarget::Global) {
@@ -1140,21 +1181,31 @@ pub fn preview_cleanup(project_root: &Path, options: CleanOptions) -> Result<Cle
     Ok(CleanupPreview {
         items,
         updates_git_excludes,
+        config_root,
+        worktree_root,
     })
 }
 
 pub fn clean_project(project_root: &Path, options: CleanOptions) -> Result<CleanupReport> {
-    let root = target_root(project_root, options.target)?;
     let preview = preview_cleanup(project_root, options)?;
+    let root = preview.worktree_root.clone();
+    let linked_shared_config = preview.config_root != preview.worktree_root;
     if options.dry_run {
         return Ok(CleanupReport {
             removed_items: preview.items,
             updated_git_excludes: preview.updates_git_excludes,
+            config_root: preview.config_root,
+            worktree_root: preview.worktree_root,
         });
     }
 
     let mut removed_items = Vec::new();
-    for path in managed_cleanup_paths(&root)? {
+    let cleanup_paths = if linked_shared_config {
+        managed_output_cleanup_paths(&root)?
+    } else {
+        managed_cleanup_paths(&root)?
+    };
+    for path in cleanup_paths {
         if path.is_dir() {
             fs::remove_dir_all(&path)?;
         } else if path.exists() {
@@ -1173,36 +1224,41 @@ pub fn clean_project(project_root: &Path, options: CleanOptions) -> Result<Clean
     Ok(CleanupReport {
         removed_items,
         updated_git_excludes,
+        config_root: preview.config_root,
+        worktree_root: preview.worktree_root,
     })
 }
 
 pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> {
-    git::ensure_git_repo(project_root)?;
-    let previous_state = load_state(project_root)?;
-    let previous_lock = load_lockfile_if_present(project_root)?;
+    let context = git::repository_context(project_root)?;
+    let previous_state = load_state(&context.worktree_root)?;
+    let config_state = load_state(&context.config_root)?;
+    let previous_lock = load_lockfile_if_present(&context.config_root)?;
     git::ensure_local_excludes(
-        project_root,
+        &context.worktree_root,
         InitOptions {
             scaffold_local_packages: false,
-            ignore_config: previous_state.ignore_config,
+            ignore_config: config_state.ignore_config,
             adapters: &["codex", "claude"],
         },
     )?;
-    let composition = compose_project_config(project_root)?;
+    let composition = compose_project_config(&context.worktree_root)?;
     let (sources, packages) =
-        resolve_composed_for_apply(project_root, &composition, previous_lock)?;
+        resolve_composed_for_apply(&context.config_root, &composition, previous_lock)?;
     let planned_files = build_plan(
-        project_root,
+        &context.worktree_root,
         &composition.adapters,
         &packages,
         &composition.overlays,
     )?;
-    verify_exposed_targets(project_root, &planned_files, &previous_state)?;
-    let drifted = collect_exposed_drifts(project_root, &planned_files, &previous_state)?;
+    verify_exposed_targets(&context.worktree_root, &planned_files, &previous_state)?;
+    let drifted = collect_exposed_drifts(&context.worktree_root, &planned_files, &previous_state)?;
 
     if options.dry_run {
-        let body =
-            render_apply_dry_run(&composition, &sources, &packages, &planned_files, &drifted);
+        let body = prepend_project_context(
+            render_apply_dry_run(&composition, &sources, &packages, &planned_files, &drifted),
+            &context,
+        );
         return Ok(ApplyReport {
             body,
             dry_run: true,
@@ -1216,9 +1272,9 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
         .collect();
     let skipped_files = approvals.values().filter(|approved| !**approved).count();
 
-    write_generated_tree(project_root, &planned_files)?;
-    remove_stale_paths(project_root, &previous_state, &planned_files)?;
-    write_exposed_tree(project_root, &planned_files, &approved_paths)?;
+    write_generated_tree(&context.worktree_root, &planned_files)?;
+    remove_stale_paths(&context.worktree_root, &previous_state, &planned_files)?;
+    write_exposed_tree(&context.worktree_root, &planned_files, &approved_paths)?;
     let lockfile = Lockfile {
         schema_version: 1,
         sources: sources
@@ -1232,10 +1288,10 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
             })
             .collect(),
     };
-    config::write_lockfile(project_root, &lockfile)?;
+    config::write_lockfile(&context.config_root, &lockfile)?;
     let state = State {
         schema_version: 1,
-        ignore_config: previous_state.ignore_config,
+        ignore_config: config_state.ignore_config,
         owned_paths: planned_files
             .iter()
             .map(|file| OwnedPath {
@@ -1250,7 +1306,7 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
             })
             .collect(),
     };
-    config::write_state(project_root, &state)?;
+    config::write_state(&context.worktree_root, &state)?;
 
     let mut body = format!(
         "Applied {} managed file(s) across {} source(s).",
@@ -1270,17 +1326,19 @@ pub fn apply(project_root: &Path, options: ApplyOptions) -> Result<ApplyReport> 
     }
 
     Ok(ApplyReport {
-        body,
+        body: prepend_project_context(body, &context),
         dry_run: false,
     })
 }
 
 pub fn diff(project_root: &Path) -> Result<String> {
-    let composition = compose_project_config(project_root)?;
+    let context = git::repository_context(project_root)?;
+    let output_root = &context.worktree_root;
+    let composition = compose_project_config(output_root)?;
     let (_, packages) = resolve_composed(&composition)?;
-    let previous_state = load_state(project_root)?;
+    let previous_state = load_state(output_root)?;
     let planned_files = build_plan(
-        project_root,
+        output_root,
         &composition.adapters,
         &packages,
         &composition.overlays,
@@ -1288,16 +1346,16 @@ pub fn diff(project_root: &Path) -> Result<String> {
 
     let desired_generated: BTreeSet<PathBuf> = planned_files
         .iter()
-        .map(|file| generated_abs_path(project_root, file))
+        .map(|file| generated_abs_path(output_root, file))
         .collect();
     let desired_exposed: BTreeSet<PathBuf> = planned_files
         .iter()
-        .map(|file| exposed_abs_path(project_root, file))
+        .map(|file| exposed_abs_path(output_root, file))
         .collect();
     let owned_previous: BTreeSet<PathBuf> = previous_state
         .owned_paths
         .iter()
-        .map(|owned| project_root.join(&owned.exposed_path))
+        .map(|owned| output_root.join(&owned.exposed_path))
         .collect();
 
     let mut generated_changes = Vec::new();
@@ -1305,21 +1363,21 @@ pub fn diff(project_root: &Path) -> Result<String> {
     let mut stale_paths = Vec::new();
     let mut safety_violations = Vec::new();
     for file in &planned_files {
-        let generated = generated_abs_path(project_root, file);
-        let exposed = exposed_abs_path(project_root, file);
+        let generated = generated_abs_path(output_root, file);
+        let exposed = exposed_abs_path(output_root, file);
         if !generated.exists() {
             generated_changes.push(ui::status_line(
                 Tone::Info,
                 &format!("generate {}", file.generated_relative_path.display()),
             ));
         }
-        if git::is_tracked(project_root, &exposed)? {
+        if git::is_tracked(output_root, &exposed)? {
             safety_violations.push(ui::status_line(
                 Tone::Warning,
                 &format!("tracked target {}", file.exposed_relative_path.display()),
             ));
         }
-        if !git::is_ignored(project_root, &exposed)? {
+        if !git::is_ignored(output_root, &exposed)? {
             safety_violations.push(ui::status_line(
                 Tone::Warning,
                 &format!("unignored target {}", file.exposed_relative_path.display()),
@@ -1357,16 +1415,16 @@ pub fn diff(project_root: &Path) -> Result<String> {
     for stale in owned_previous.difference(&desired_exposed) {
         stale_paths.push(ui::status_line(
             Tone::Warning,
-            &format!("remove {}", stale.strip_prefix(project_root)?.display()),
+            &format!("remove {}", stale.strip_prefix(output_root)?.display()),
         ));
     }
-    for generated_path in collect_file_paths(&project_root.join(".ply").join("generated"))? {
+    for generated_path in collect_file_paths(&output_root.join(".ply").join("generated"))? {
         if !desired_generated.contains(&generated_path) {
             stale_paths.push(ui::status_line(
                 Tone::Warning,
                 &format!(
                     "remove {}",
-                    generated_path.strip_prefix(project_root)?.display()
+                    generated_path.strip_prefix(output_root)?.display()
                 ),
             ));
         }
@@ -1379,17 +1437,26 @@ pub fn diff(project_root: &Path) -> Result<String> {
         ("Safety violations", safety_violations),
     ]);
     if rendered.is_empty() {
-        return Ok("no differences".to_string());
+        return Ok(prepend_project_context(
+            "no differences".to_string(),
+            &context,
+        ));
     }
-    Ok(rendered)
+    Ok(prepend_project_context(rendered, &context))
 }
 
 pub fn doctor(project_root: &Path, target: CommandTarget) -> Result<String> {
-    let root = target_root(project_root, target)?;
-    let composition = if matches!(target, CommandTarget::Global) {
-        compose_single_root(&root, LayerKind::Global)?
+    let project_context = matches!(target, CommandTarget::Project)
+        .then(|| git::repository_context(project_root))
+        .transpose()?;
+    let root = if let Some(context) = &project_context {
+        context.worktree_root.clone()
     } else {
-        compose_project_config(project_root)?
+        config::global_root()?
+    };
+    let composition = match &project_context {
+        Some(context) => compose_project_config(&context.worktree_root)?,
+        None => compose_single_root(&root, LayerKind::Global)?,
     };
     let (sources, packages) = resolve_composed(&composition)?;
     let planned_files = build_plan(
@@ -1456,18 +1523,20 @@ pub fn doctor(project_root: &Path, target: CommandTarget) -> Result<String> {
             ));
         }
     }
-    Ok(render_report_sections(&[
-        ("Healthy checks", healthy),
-        ("Warnings", warnings),
-    ]))
+    let report = render_report_sections(&[("Healthy checks", healthy), ("Warnings", warnings)]);
+    Ok(match project_context {
+        Some(context) => prepend_project_context(report, &context),
+        None => report,
+    })
 }
 
 pub fn list_packages(project_root: &Path, target: CommandTarget) -> Result<String> {
-    let root = target_root(project_root, target)?;
-    let composition = if matches!(target, CommandTarget::Global) {
-        compose_single_root(&root, LayerKind::Global)?
-    } else {
-        compose_project_config(project_root)?
+    let project_context = matches!(target, CommandTarget::Project)
+        .then(|| git::repository_context(project_root))
+        .transpose()?;
+    let composition = match &project_context {
+        Some(context) => compose_project_config(&context.worktree_root)?,
+        None => compose_single_root(&config::global_root()?, LayerKind::Global)?,
     };
     let (_, packages) = resolve_composed(&composition)?;
     let mut lines = Vec::new();
@@ -1486,15 +1555,20 @@ pub fn list_packages(project_root: &Path, target: CommandTarget) -> Result<Strin
     if lines.is_empty() {
         lines.push(ui::list_item("No packages configured."));
     }
-    Ok(lines.join("\n"))
+    let report = lines.join("\n");
+    Ok(match project_context {
+        Some(context) => prepend_project_context(report, &context),
+        None => report,
+    })
 }
 
 pub fn list_sources(project_root: &Path, target: CommandTarget) -> Result<String> {
-    let root = target_root(project_root, target)?;
-    let composition = if matches!(target, CommandTarget::Global) {
-        compose_single_root(&root, LayerKind::Global)?
-    } else {
-        compose_project_config(project_root)?
+    let project_context = matches!(target, CommandTarget::Project)
+        .then(|| git::repository_context(project_root))
+        .transpose()?;
+    let composition = match &project_context {
+        Some(context) => compose_project_config(&context.worktree_root)?,
+        None => compose_single_root(&config::global_root()?, LayerKind::Global)?,
     };
     let (sources, _) = resolve_composed(&composition)?;
     let mut lines = Vec::new();
@@ -1510,7 +1584,11 @@ pub fn list_sources(project_root: &Path, target: CommandTarget) -> Result<String
     if lines.is_empty() {
         lines.push(ui::list_item("No sources configured."));
     }
-    Ok(lines.join("\n"))
+    let report = lines.join("\n");
+    Ok(match project_context {
+        Some(context) => prepend_project_context(report, &context),
+        None => report,
+    })
 }
 
 fn render_source_summary(source: &SourceConfig) -> String {
@@ -1608,16 +1686,44 @@ fn collect_updated_git_ids(
 
 fn target_root(project_root: &Path, target: CommandTarget) -> Result<PathBuf> {
     match target {
-        CommandTarget::Project => Ok(project_root.to_path_buf()),
+        CommandTarget::Project => Ok(git::repository_context(project_root)?.config_root),
         CommandTarget::Global => config::global_root(),
     }
 }
 
+fn project_context_lines(context: &git::RepositoryContext) -> Vec<String> {
+    let config_origin = if context.uses_main_worktree_config() {
+        "main worktree"
+    } else {
+        "active worktree"
+    };
+    vec![
+        ui::status_line(
+            Tone::Info,
+            &format!(
+                "configuration ({config_origin}): {}",
+                context.config_root.display()
+            ),
+        ),
+        ui::status_line(
+            Tone::Info,
+            &format!("active worktree: {}", context.worktree_root.display()),
+        ),
+    ]
+}
+
+fn prepend_project_context(body: String, context: &git::RepositoryContext) -> String {
+    render_report_sections(&[("Repository context", project_context_lines(context))])
+        + if body.is_empty() { "" } else { "\n\n" }
+        + &body
+}
+
 fn compose_project_config(project_root: &Path) -> Result<ComposedConfig> {
-    let project_manifest = load_manifest(project_root)?;
-    let project_local_manifest = load_local_manifest_if_present(project_root)?;
-    let project_ssh_config = load_ssh_config_if_present(project_root)?.unwrap_or_default();
-    let project_overlays = load_local_overlays(project_root)?;
+    let config_root = git::repository_context(project_root)?.config_root;
+    let project_manifest = load_manifest(&config_root)?;
+    let project_local_manifest = load_local_manifest_if_present(&config_root)?;
+    let project_ssh_config = load_ssh_config_if_present(&config_root)?.unwrap_or_default();
+    let project_overlays = load_local_overlays(&config_root)?;
     let project_manifest = merge_local_manifest(project_manifest, project_local_manifest)?;
     let mut layers = Vec::new();
 
@@ -1640,7 +1746,7 @@ fn compose_project_config(project_root: &Path) -> Result<ComposedConfig> {
 
     layers.push(LayerConfig {
         kind: LayerKind::Project,
-        root: project_root.to_path_buf(),
+        root: config_root,
         manifest: project_manifest,
         ssh_config: project_ssh_config,
         overlays: project_overlays,
@@ -2552,10 +2658,10 @@ fn render_codex_prompt_markdown(
     resource: &crate::prompt_resources::ParsedPromptResource,
 ) -> String {
     let mut sections = Vec::new();
-    if resource.shared.argument_hint.is_some() {
-        if let Some(metadata) = render_codex_command_metadata(resource) {
-            sections.push(metadata);
-        }
+    if resource.shared.argument_hint.is_some()
+        && let Some(metadata) = render_codex_command_metadata(resource)
+    {
+        sections.push(metadata);
     }
     if let Some(preamble) = render_codex_prompt_preamble(resource) {
         sections.push(preamble);
@@ -3116,6 +3222,17 @@ fn managed_cleanup_paths(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths.into_iter().collect())
 }
 
+fn managed_output_cleanup_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = collect_managed_asset_roots(root)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let ply_state = root.join(".ply");
+    if ply_state.exists() {
+        paths.insert(ply_state);
+    }
+    Ok(paths.into_iter().collect())
+}
+
 fn collect_managed_asset_roots(project_root: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
@@ -3636,9 +3753,84 @@ mod tests {
                 target: CommandTarget::Project,
             },
         )?;
-        assert!(report.target_root.join("ply.toml").exists());
-        assert!(report.target_root.join("ply.local.toml").exists());
-        assert!(report.target_root.join(".ply").join("state.json").exists());
+        assert!(report.config_root.join("ply.toml").exists());
+        assert!(report.config_root.join("ply.local.toml").exists());
+        assert!(
+            report
+                .worktree_root
+                .join(".ply")
+                .join("state.json")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_uses_main_config_and_keeps_output_state_local() -> Result<()> {
+        let temp = TempDir::new()?;
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        fs::create_dir_all(&main)?;
+        exec_in(&main, &["init", "-b", "main"])?;
+        exec_in(&main, &["config", "user.email", "test@example.com"])?;
+        exec_in(&main, &["config", "user.name", "Test User"])?;
+        write(&main.join("README.md"), "# fixture\n")?;
+        exec_in(&main, &["add", "README.md"])?;
+        exec_in(&main, &["commit", "-m", "initial"])?;
+
+        init_project(
+            &main,
+            InitRequest {
+                options: InitOptions {
+                    scaffold_local_packages: true,
+                    ignore_config: true,
+                    adapters: &["codex"],
+                },
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        let mut manifest = load_manifest_for_edit(&main)?;
+        manifest.install.use_global = false;
+        config::write_manifest(&main, &manifest)?;
+
+        exec_in(
+            &main,
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        )?;
+
+        let context = git::repository_context(&linked)?;
+        assert_eq!(context.config_root, main);
+        assert_eq!(context.worktree_root, linked);
+
+        let report = apply(
+            &linked,
+            ApplyOptions {
+                dry_run: false,
+                yes: true,
+            },
+        )?;
+        assert!(report.body.contains("configuration (main worktree)"));
+        assert!(linked.join(".ply/state.json").exists());
+        assert!(main.join("ply.lock").exists());
+        assert!(!linked.join("ply.lock").exists());
+        assert!(linked.join(".agents/skills/ply-review-diff").exists());
+
+        let doctor_report = doctor(&linked, CommandTarget::Project)?;
+        assert!(doctor_report.contains(&main.display().to_string()));
+        assert!(doctor_report.contains(&linked.display().to_string()));
+
+        let cleanup = clean_project(
+            &linked,
+            CleanOptions {
+                dry_run: false,
+                target: CommandTarget::Project,
+            },
+        )?;
+        assert_eq!(cleanup.config_root, main);
+        assert!(!cleanup.updated_git_excludes);
+        assert!(cleanup.config_root.join("ply.toml").exists());
+        assert!(!linked.join(".ply").exists());
         Ok(())
     }
 

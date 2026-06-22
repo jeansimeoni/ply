@@ -66,7 +66,11 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
         Command::Init(options) => {
             let request = options.options.resolve()?;
             let report = ops::init_project(project_root, request)?;
-            let mut body = format!("Target root: {}", report.target_root.display());
+            let mut body = format!(
+                "Configuration root: {}\nActive worktree: {}",
+                report.config_root.display(),
+                report.worktree_root.display()
+            );
             body.push_str("\n\nPlanned:");
             body.push('\n');
             body.push_str(&ui::list_item(if report.created_manifest {
@@ -115,17 +119,12 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
         }
         Command::Diff => {
             let summary = ops::diff(project_root)?;
-            let tone = if summary == "no differences" {
+            let tone = if summary.ends_with("no differences") {
                 Tone::Success
             } else {
                 Tone::Info
             };
-            let body = if summary == "no differences" {
-                "Managed files match the resolved project and global layers."
-            } else {
-                &summary
-            };
-            ui::print_stdout(tone, "Diff report", body);
+            ui::print_stdout(tone, "Diff report", &summary);
         }
         Command::Doctor(DoctorCommand {
             command: Some(DoctorSubcommand::Package(options)),
@@ -194,7 +193,8 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 },
                 target,
             )?;
-            ui::print_stdout(Tone::Success, "Updated manifest", &report.body);
+            let body = with_command_context(project_root, target, report.body)?;
+            ui::print_stdout(Tone::Success, "Updated manifest", &body);
         }
         Command::Remove(options) => {
             let target = command_target(options.global);
@@ -206,7 +206,8 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                     force: options.force,
                 },
             )?;
-            ui::print_stdout(Tone::Warning, "Updated manifest", &report.body);
+            let body = with_command_context(project_root, target, report.body)?;
+            ui::print_stdout(Tone::Warning, "Updated manifest", &body);
         }
         Command::Update(options) => {
             let target = command_target(options.global);
@@ -217,7 +218,8 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                 },
                 target,
             )?;
-            ui::print_stdout(Tone::Success, "Updated sources", &report.body);
+            let body = with_command_context(project_root, target, report.body)?;
+            ui::print_stdout(Tone::Success, "Updated sources", &body);
         }
         Command::Clean(options) => {
             let target = if options.global {
@@ -263,7 +265,11 @@ fn run_command(project_root: &Path, command: Command) -> Result<()> {
                     target,
                 },
             )?;
-            let mut body = String::new();
+            let mut body = format!(
+                "Configuration root: {}\nActive worktree: {}\n\n",
+                report.config_root.display(),
+                report.worktree_root.display()
+            );
             if report.removed_items.is_empty() {
                 body.push_str("No Ply-managed files were found.");
             } else {
@@ -751,9 +757,54 @@ fn command_target(global: bool) -> CommandTarget {
     }
 }
 
+fn with_command_context(
+    project_root: &Path,
+    target: CommandTarget,
+    body: String,
+) -> Result<String> {
+    let context = match target {
+        CommandTarget::Project => {
+            let context = git::repository_context(project_root)?;
+            let origin = if context.uses_main_worktree_config() {
+                "main worktree"
+            } else {
+                "active worktree"
+            };
+            format!(
+                "{}\n{}\n\n",
+                ui::status_line(
+                    Tone::Info,
+                    &format!(
+                        "configuration ({origin}): {}",
+                        context.config_root.display()
+                    )
+                ),
+                ui::status_line(
+                    Tone::Info,
+                    &format!("active worktree: {}", context.worktree_root.display())
+                )
+            )
+        }
+        CommandTarget::Global => format!(
+            "{}\n\n",
+            ui::status_line(
+                Tone::Info,
+                &format!(
+                    "configuration (global): {}",
+                    config::global_root()?.display()
+                )
+            )
+        ),
+    };
+    Ok(context + &body)
+}
+
 fn resolve_target_root(project_root: &Path, target: CommandTarget) -> Result<std::path::PathBuf> {
     match target {
-        CommandTarget::Project => Ok(project_root.to_path_buf()),
+        CommandTarget::Project => match git::repository_context(project_root) {
+            Ok(context) => Ok(context.config_root),
+            Err(_) => Ok(project_root.to_path_buf()),
+        },
         CommandTarget::Global => config::global_root(),
     }
 }

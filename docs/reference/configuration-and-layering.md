@@ -182,6 +182,21 @@ ignore block also covers:
 
 If init runs with `--track-config`, those shared config files remain trackable.
 
+## Git worktree resolution
+
+Project commands resolve a configuration root and an active worktree. The
+configuration root provides manifests, overlays, source locations, caches, and
+the lockfile. The active worktree receives generated files, exposed adapter
+assets, and ownership state.
+
+The active worktree is the configuration root when it contains `ply.toml`.
+Otherwise, a linked worktree falls back to the main worktree's configuration.
+Relative path sources and overlays resolve from the configuration root.
+
+Git-local ignore rules are resolved through Git itself, so linked worktrees use
+the repository's shared `info/exclude` file even though their `.git` entry is a
+file rather than a directory.
+
 ## Ownership boundaries
 
 Generated or managed outputs belong to Ply.

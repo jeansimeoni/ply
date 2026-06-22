@@ -1,6 +1,6 @@
 pkgbase = ply-bin
 	pkgdesc = Local-first package manager for coding-agent assets.
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://plycli.dev
 	arch = x86_64
@@ -9,9 +9,9 @@ pkgbase = ply-bin
 	depends = git
 	provides = ply
 	conflicts = ply
-	source_x86_64 = ply-0.1.0-x86_64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.0/ply-x86_64-unknown-linux-musl.tar.xz
+	source_x86_64 = ply-0.1.1-x86_64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.1/ply-x86_64-unknown-linux-musl.tar.xz
 	sha256sums_x86_64 = 2222222222222222222222222222222222222222222222222222222222222222
-	source_aarch64 = ply-0.1.0-aarch64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.0/ply-aarch64-unknown-linux-musl.tar.xz
+	source_aarch64 = ply-0.1.1-aarch64.tar.xz::https://github.com/jeansimeoni/ply/releases/download/v0.1.1/ply-aarch64-unknown-linux-musl.tar.xz
 	sha256sums_aarch64 = 1111111111111111111111111111111111111111111111111111111111111111
 
 pkgname = ply-bin

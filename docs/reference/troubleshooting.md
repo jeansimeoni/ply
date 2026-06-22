@@ -19,6 +19,24 @@ Fix:
 - run `ply init` in the project repo
 - or run `ply init -g` for the user-global root
 
+## Unexpected configuration root in a worktree
+
+Project command reports show the resolved configuration root and active
+worktree. A linked worktree uses the main worktree's configuration when it does
+not contain its own `ply.toml`.
+
+Add `ply.toml` to the active worktree when branch-specific configuration is
+intended. Otherwise, configuration-changing commands update the displayed
+shared root.
+
+If Git reports a main worktree that no longer exists, inspect and repair its
+metadata:
+
+```bash
+git worktree list
+git worktree prune
+```
+
 ## Project commands fail outside a Git repo
 
 Symptoms usually appear when running project-mode:

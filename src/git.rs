@@ -13,9 +13,56 @@ use crate::ui;
 const PLY_EXCLUDE_START: &str = "# ply:start";
 const PLY_EXCLUDE_END: &str = "# ply:end";
 
-pub fn ensure_git_repo(project_root: &Path) -> Result<()> {
-    run_git(project_root, ["rev-parse", "--show-toplevel"])?;
-    Ok(())
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryContext {
+    pub worktree_root: PathBuf,
+    pub main_worktree_root: PathBuf,
+    pub config_root: PathBuf,
+    pub exclude_path: PathBuf,
+}
+
+impl RepositoryContext {
+    pub fn is_linked_worktree(&self) -> bool {
+        self.worktree_root != self.main_worktree_root
+    }
+
+    pub fn uses_main_worktree_config(&self) -> bool {
+        self.config_root == self.main_worktree_root && self.is_linked_worktree()
+    }
+}
+
+pub fn repository_context(project_root: &Path) -> Result<RepositoryContext> {
+    let worktree_root = PathBuf::from(run_git(
+        project_root,
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+    )?);
+    let worktrees = run_git(project_root, ["worktree", "list", "--porcelain"])?;
+    let main_worktree_root = worktrees
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("Git did not report a main worktree"))?;
+    let exclude_path = PathBuf::from(run_git(
+        project_root,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ],
+    )?);
+    let config_root = if worktree_root.join("ply.toml").exists() {
+        worktree_root.clone()
+    } else {
+        main_worktree_root.clone()
+    };
+
+    Ok(RepositoryContext {
+        worktree_root,
+        main_worktree_root,
+        config_root,
+        exclude_path,
+    })
 }
 
 pub fn is_git_repo(project_root: &Path) -> bool {
@@ -26,7 +73,7 @@ pub fn ensure_local_excludes(project_root: &Path, options: InitOptions) -> Resul
     if !is_git_repo(project_root) {
         return Ok(());
     }
-    let exclude_path = project_root.join(".git").join("info").join("exclude");
+    let exclude_path = repository_context(project_root)?.exclude_path;
     let mut block = String::from(
         r#"# ply:start
 .ply/generated/
@@ -104,7 +151,10 @@ pub fn has_ply_excludes(project_root: &Path) -> bool {
     if !is_git_repo(project_root) {
         return false;
     }
-    let exclude_path = project_root.join(".git").join("info").join("exclude");
+    let Ok(context) = repository_context(project_root) else {
+        return false;
+    };
+    let exclude_path = context.exclude_path;
     fs::read_to_string(exclude_path)
         .map(|content| content.contains(PLY_EXCLUDE_START))
         .unwrap_or(false)
@@ -114,7 +164,7 @@ pub fn remove_local_excludes(project_root: &Path) -> Result<bool> {
     if !is_git_repo(project_root) {
         return Ok(false);
     }
-    let exclude_path = project_root.join(".git").join("info").join("exclude");
+    let exclude_path = repository_context(project_root)?.exclude_path;
     let existing = match fs::read_to_string(&exclude_path) {
         Ok(content) => content,
         Err(_) => return Ok(false),
@@ -607,6 +657,45 @@ mod tests {
         assert!(content.contains("ply.toml"));
         assert!(content.contains("ply.lock"));
         assert!(content.contains("ply-packages/"));
+        Ok(())
+    }
+
+    #[test]
+    fn repository_context_resolves_linked_worktree_and_shared_excludes() -> Result<()> {
+        let temp = TempDir::new()?;
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        fs::create_dir_all(&main)?;
+        run_git(&main, ["init", "-b", "main"])?;
+        run_git(&main, ["config", "user.email", "test@example.com"])?;
+        run_git(&main, ["config", "user.name", "Test User"])?;
+        fs::write(main.join("README.md"), "# fixture\n")?;
+        run_git(&main, ["add", "README.md"])?;
+        run_git(&main, ["commit", "-m", "initial"])?;
+        run_git(
+            &main,
+            ["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        )?;
+
+        let context = repository_context(&linked)?;
+        assert_eq!(context.worktree_root, linked);
+        assert_eq!(context.main_worktree_root, main);
+        assert_eq!(context.config_root, main);
+        assert!(context.uses_main_worktree_config());
+        assert_eq!(
+            context.exclude_path,
+            context.main_worktree_root.join(".git/info/exclude")
+        );
+
+        ensure_local_excludes(
+            &context.worktree_root,
+            InitOptions {
+                scaffold_local_packages: false,
+                ignore_config: true,
+                adapters: &["codex", "claude"],
+            },
+        )?;
+        assert!(fs::read_to_string(&context.exclude_path)?.contains("# ply:start"));
         Ok(())
     }
 

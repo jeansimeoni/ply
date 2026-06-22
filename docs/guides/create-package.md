@@ -146,6 +146,7 @@ codex:
 ---
 
 Interpret `$ARGUMENTS` as:
+
 - required: `<ticket-number>`
 - optional: `--coverage=<n>`
 - optional: `--post-comments`

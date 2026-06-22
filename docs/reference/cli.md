@@ -2,6 +2,11 @@
 
 This page summarizes the current MVP CLI surface.
 
+Project-scoped command reports include the resolved configuration root and
+active Git worktree. A linked worktree falls back to the main worktree's
+configuration when it does not contain `ply.toml`; generated output still
+targets the active worktree.
+
 ## Notes
 
 - Project-mode commands expect `ply.toml` to exist unless the command is

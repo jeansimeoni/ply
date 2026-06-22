@@ -29,4 +29,4 @@ Security reports are most useful for issues that affect:
 
 The current supported public baseline is:
 
-- `v0.1.0`
+- `v0.1.1`

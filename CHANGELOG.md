@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.1
+
+- add native support for resolving shared configuration from the main Git
+  worktree while keeping generated state isolated per worktree
+- show the resolved configuration root and active worktree in project command
+  reports
+- resolve clone-local ignore rules correctly when `.git` is a worktree pointer
+  file
+- improve Codex command metadata rendering and prompt-resource parse errors
+
 ## v0.1.0
 
 First public release of Ply.

@@ -141,6 +141,7 @@ argument-hint: "<ticket-number> [--coverage=80] [--post-comments]"
 ---
 
 Interpret `$ARGUMENTS` as:
+
 - required: `<ticket-number>`
 - optional: `--coverage=<n>`
 - optional: `--post-comments`
@@ -329,6 +330,7 @@ codex:
 ---
 
 Interpret `$ARGUMENTS` as:
+
 - required: `<ticket-number>`
 - optional: `--coverage=<n>`
 - optional: `--post-comments`
@@ -353,6 +355,7 @@ Preferred tools: shell, patch
 ---
 
 Interpret `$ARGUMENTS` as:
+
 - required: `<ticket-number>`
 - optional: `--coverage=<n>`
 - optional: `--post-comments`
