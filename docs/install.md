@@ -40,7 +40,11 @@ extract it, and place `ply` somewhere on your `PATH`.
 ## Shell Installer
 
 The shell installer downloads the matching stable release artifact and installs
-`ply` into `${CARGO_HOME:-$HOME/.cargo}/bin`.
+`ply` into `$HOME/.local/bin`.
+
+The installer may add that stable directory to your shell `PATH`. It does not
+use `CARGO_HOME`, because development tools can temporarily point that variable
+at an ephemeral directory.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jeansimeoni/ply/releases/latest/download/ply-installer.sh | sh
@@ -51,6 +55,9 @@ Confirm the installed binary:
 ```bash
 ply -V
 ```
+
+If `$HOME/.local/bin` is already on your `PATH`, the installer does not need to
+change your shell startup files.
 
 ## Homebrew
 

@@ -12,7 +12,7 @@ targets = [
   "x86_64-unknown-linux-musl",
   "aarch64-unknown-linux-musl",
 ]
-install-path = "CARGO_HOME"
+install-path = "~/.local/bin"
 hosting = "github"
 publish-prereleases = false
 install-updater = false

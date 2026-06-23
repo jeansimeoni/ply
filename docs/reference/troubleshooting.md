@@ -2,6 +2,23 @@
 
 This page collects common failure modes in the current MVP.
 
+## Shell startup references a missing temporary Ply directory
+
+Affected shell-installer builds before the next release could inherit a
+temporary `CARGO_HOME` and add references such as `/tmp/.../env` to shell
+startup files. After a reboot clears `/tmp`, login or shell startup can fail.
+
+Remove only the missing Ply installer lines from:
+
+- `~/.profile`
+- `~/.bashrc` and `~/.bash_profile`
+- `~/.zshrc` and `~/.zshenv`
+- `~/.config/fish/conf.d/ply.env.fish`
+
+Then reinstall Ply using a current package or installer. Current shell
+installers use the stable `$HOME/.local/bin` path and do not derive their
+destination from `CARGO_HOME`.
+
 ## `ply is not initialized`
 
 Symptom:

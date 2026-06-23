@@ -92,6 +92,33 @@ When terminal capabilities allow, support:
 
 Always maintain a clean ASCII fallback.
 
+## Installer Testing Safety
+
+Treat cargo-dist shell installer testing as a state-changing operation that can
+modify the developer's shell startup files.
+
+- A normal `cargo build`, `cargo run`, or direct execution of
+  `target/debug/ply` must not be replaced with an installer invocation.
+- Never test a Ply installer with `CARGO_HOME` pointing to a temporary
+  directory.
+- When testing an installer with a temporary destination, always disable shell
+  `PATH` modification:
+
+```bash
+tmp_dir="$(mktemp -d)"
+PLY_INSTALL_DIR="$tmp_dir" \
+PLY_NO_MODIFY_PATH=1 \
+./ply-installer.sh
+```
+
+- Before running any local installer test, verify that its destination is
+  stable or that PATH modification is disabled.
+- Installer tests must not leave references to `/tmp`, `$TMPDIR`, or another
+  ephemeral directory in `~/.profile`, `~/.bashrc`, `~/.bash_profile`,
+  `~/.zshrc`, `~/.zshenv`, or `~/.config/fish/conf.d/`.
+- Prefer isolated test homes or containers when validating shell startup
+  modification behavior.
+
 ## Implementation Guidance
 
 - Prefer explicit ownership boundaries over implicit mutation.

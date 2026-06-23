@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- prevent the shell installer from persisting temporary `CARGO_HOME` paths in
+  shell startup files by installing to `$HOME/.local/bin`
+
 ## v0.1.1
 
 - add native support for resolving shared configuration from the main Git
