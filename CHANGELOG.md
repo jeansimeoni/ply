@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.1.2
+
+- allow package repositories to contain top-level agent workspace directories
+  such as `.claude/`, `.agents/`, and `.codex/` as private authoring state
 - prevent the shell installer from persisting temporary `CARGO_HOME` paths in
   shell startup files by installing to `$HOME/.local/bin`
 

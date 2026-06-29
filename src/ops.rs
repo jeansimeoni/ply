@@ -4,7 +4,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::adapters::{AdapterKind, AssetKind, ExposureMode};
+use crate::adapters::{AdapterKind, AssetKind, ExposureMode, is_package_workspace_dir};
 use crate::config::{
     self, InitOptions, LocalManifest, LocalOverlayConfig, LocalSourceConfig, LockedSource,
     Lockfile, Manifest, OverlayEntry, OwnedPath, PackageManifest, SourceConfig, SshConfigFile,
@@ -1102,7 +1102,7 @@ fn ensure_package_bootstrap_target(target_root: &Path, kinds: &[AssetKind]) -> R
     for entry in &entries {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !allowed_names.contains(&name.as_ref()) {
+        if !allowed_names.contains(&name.as_ref()) && !is_package_workspace_dir(&name) {
             return Err(anyhow!(
                 "refusing to initialize package in non-empty directory {}; found `{}`",
                 target_root.display(),
@@ -3408,15 +3408,8 @@ fn validate_package_root(package_root: &Path, manifest: &PackageManifest) -> Res
         if name == "ply-package.toml" || is_asset_metadata_file(&path) {
             continue;
         }
-        if matches!(
-            name.as_str(),
-            ".claude" | ".agents" | ".codex" | ".cursor" | ".gemini"
-        ) {
-            return Err(anyhow!(
-                "package `{}` contains unsupported adapter directory `{}`; use portable package asset kinds instead",
-                manifest.name,
-                name
-            ));
+        if is_package_workspace_dir(&name) {
+            continue;
         }
         if name == "local-instructions.md" {
             if !entry.file_type()?.is_file() {
@@ -4198,24 +4191,52 @@ mod tests {
     }
 
     #[test]
-    fn reject_package_with_unsupported_adapter_directory() -> Result<()> {
+    fn ignore_package_workspace_directories_when_applying() -> Result<()> {
         let temp = make_project()?;
         init_test_project(temp.path(), true)?;
         let package_root = example_package_root(temp.path());
-        fs::create_dir_all(package_root.join(".claude"))?;
+        for dir in [".claude", ".agents", ".codex", ".cursor", ".gemini"] {
+            write(
+                &package_root
+                    .join(dir)
+                    .join("commands")
+                    .join("should-not-import.md"),
+                "# private authoring state\n",
+            )?;
+        }
 
-        let err = apply(
+        apply(
             temp.path(),
             ApplyOptions {
                 dry_run: false,
                 yes: true,
             },
-        )
-        .unwrap_err();
+        )?;
         assert!(
-            err.to_string()
-                .contains("unsupported adapter directory `.claude`")
+            temp.path()
+                .join(".claude")
+                .join("skills")
+                .join("ply-review-diff")
+                .exists()
         );
+        assert!(
+            !temp
+                .path()
+                .join(".claude")
+                .join("commands")
+                .join("should-not-import.md")
+                .exists()
+        );
+        assert!(
+            !temp
+                .path()
+                .join(".agents")
+                .join("commands")
+                .join("should-not-import.md")
+                .exists()
+        );
+        assert!(!temp.path().join(".cursor").exists());
+        assert!(!temp.path().join(".gemini").exists());
         Ok(())
     }
 
@@ -4716,6 +4737,27 @@ Use short, direct responses.
     }
 
     #[test]
+    fn init_package_allows_agent_workspace_directories() -> Result<()> {
+        let temp = TempDir::new()?;
+        for dir in [".claude", ".agents", ".codex", ".cursor", ".gemini"] {
+            fs::create_dir_all(temp.path().join(dir))?;
+        }
+        let report = init_package(
+            temp.path(),
+            PackageInitRequest {
+                name: "review-tools".to_string(),
+                path: PathBuf::from("."),
+                kinds: vec![AssetKind::Skills],
+                dry_run: false,
+            },
+        )?;
+        assert_eq!(report.target_root, temp.path());
+        assert!(temp.path().join("ply-package.toml").exists());
+        assert!(temp.path().join("skills").exists());
+        Ok(())
+    }
+
+    #[test]
     fn init_package_can_scaffold_agents_directory() -> Result<()> {
         let temp = TempDir::new()?;
         init_package(
@@ -5134,6 +5176,40 @@ Use short, direct responses.
         let message = err.to_string();
         assert!(message.contains("failed to load"));
         assert!(message.contains("doctor package --fix"));
+        Ok(())
+    }
+
+    #[test]
+    fn doctor_package_ignores_agent_workspace_directories() -> Result<()> {
+        let temp = TempDir::new()?;
+        let package_root = temp.path().join("review-tools");
+        fs::create_dir_all(package_root.join("skills").join("check"))?;
+        config::write_package_manifest(&package_root, "review-tools")?;
+        write(
+            &package_root.join("skills").join("check").join("SKILL.md"),
+            "# check\n",
+        )?;
+        for dir in [".claude", ".agents", ".codex", ".cursor", ".gemini"] {
+            write(
+                &package_root
+                    .join(dir)
+                    .join("commands")
+                    .join("should-not-import.md"),
+                "# private authoring state\n",
+            )?;
+        }
+
+        let report = doctor_package(
+            temp.path(),
+            PackageDoctorRequest {
+                path: package_root,
+                fix: false,
+            },
+        )?;
+
+        assert!(report.body.contains("package root passed structure checks"));
+        assert!(!report.body.contains("should-not-import"));
+        assert!(!report.body.contains("unsupported adapter directory"));
         Ok(())
     }
 

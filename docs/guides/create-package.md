@@ -228,9 +228,11 @@ ply package set license MIT
 ply package set targets codex,claude
 ```
 
-Validation also rejects package roots that contain adapter-owned directories
-such as `.claude/`, `.agents/`, or `.codex/`. Author package content in the
-portable package asset kinds instead.
+Package repos may contain top-level agent workspace directories such as
+`.claude/`, `.agents/`, or `.codex/` while you author the package. Ply ignores
+those directories as private authoring state and does not import them into
+consuming projects. Author distributable package content in the portable
+package asset kinds instead.
 
 ## Add adapter targeting when needed
 

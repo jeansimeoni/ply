@@ -27,6 +27,12 @@ pub enum ExposureMode {
     GeneratedComposite,
 }
 
+pub const PACKAGE_WORKSPACE_DIRS: &[&str] = &[".claude", ".agents", ".codex", ".cursor", ".gemini"];
+
+pub fn is_package_workspace_dir(name: &str) -> bool {
+    PACKAGE_WORKSPACE_DIRS.contains(&name)
+}
+
 impl ExposureMode {
     pub fn as_str(self) -> &'static str {
         match self {

@@ -62,6 +62,9 @@ through `.git/info/exclude`.
 
 - Compose reusable prompts, commands, skills, agents, rules, hooks, and output
   styles without copying opaque folders between repos
+- Author packages inside repos that also contain agent workspace folders such
+  as `.claude/` or `.codex/`; Ply treats those folders as private authoring
+  state and imports only portable package assets
 - Keep repository-owned context repository-owned instead of letting a tool take
   over files such as `AGENTS.md` or `CLAUDE.md`
 - Layer project sources and optional user-global sources so personal workflow

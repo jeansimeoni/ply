@@ -87,19 +87,20 @@ Fix:
 Remember that one source maps to one package root. Ply does not select a
 sub-package from within a larger source tree.
 
-## `package <name> contains unsupported adapter directory ...`
+## Package repos with agent workspace directories
 
-Cause:
+Behavior:
 
-- the package root contains adapter-owned directories such as `.claude/`,
-  `.agents/`, or `.codex/`
+- top-level agent workspace directories such as `.claude/`, `.agents/`,
+  `.codex/`, `.cursor/`, and `.gemini/` are ignored in package roots
+- these directories are treated as private authoring state and are not imported
+  into consuming projects
 
-Fix:
+If expected content is missing after import:
 
-- move authored package content into portable package asset kinds such as
+- move distributable package content into portable package asset kinds such as
   `skills/`, `commands/`, `agents/`, `rules/`, `hooks/`, `output-styles/`, or
   `local-instructions.md`
-- remove adapter-owned output directories from the package root
 
 ## `package <name> does not expose any supported managed assets`
 

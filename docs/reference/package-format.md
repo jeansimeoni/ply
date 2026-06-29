@@ -30,10 +30,13 @@ Each configured source points at one package root. A source is invalid if
 If package-level `targets` is present, it defines the maximum adapter set for
 the package. Resource-level `targets` may only narrow further inside that set.
 
-Package validation also rejects:
+Package validation also ignores top-level agent workspace directories such as
+`.claude/`, `.agents/`, `.codex/`, `.cursor/`, and `.gemini/`. These folders are
+treated as private package-repo authoring state, not package assets, and they
+are never imported into consuming projects.
 
-- unsupported adapter-owned directories such as `.claude/`, `.agents/`,
-  `.codex/`, `.cursor/`, and `.gemini/`
+Package validation still rejects:
+
 - package roots that contain no supported managed assets
 
 ## Supported top-level asset kinds
